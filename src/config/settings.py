@@ -1,12 +1,17 @@
 """
 Settings manager with JSON persistence and file-watching for hot-reload.
 
-Stores settings in ``$XDG_CONFIG_HOME/lyricaod/settings.json`` and
-uses ``QFileSystemWatcher`` to detect external edits at runtime.
+Stores settings in a platform-appropriate config directory:
+  - Linux/macOS: ``$XDG_CONFIG_HOME/lyricaod/settings.json``
+    (defaults to ``~/.config/lyricaod/settings.json``)
+  - Windows:     ``%APPDATA%\\lyricaod\\settings.json``
+
+Uses ``QFileSystemWatcher`` to detect external edits at runtime.
 """
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QFileSystemWatcher, Signal
@@ -74,7 +79,14 @@ class Settings(QObject):
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
-        config_home = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        if sys.platform == "win32":
+            config_home = os.environ.get(
+                "APPDATA", str(Path.home() / "AppData" / "Roaming")
+            )
+        else:
+            config_home = os.environ.get(
+                "XDG_CONFIG_HOME", str(Path.home() / ".config")
+            )
         self._config_dir = Path(config_home) / "lyricaod"
         self._config_dir.mkdir(parents=True, exist_ok=True)
         self._file = self._config_dir / "settings.json"

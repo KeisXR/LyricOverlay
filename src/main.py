@@ -1,8 +1,10 @@
 """
-Lyricaod — Desktop Lyrics Overlay for KDE Plasma.
+Lyricaod — Desktop Lyrics Overlay.
 
 Displays synced / unsynced lyrics as a transparent overlay on top of
 all other windows, sourced from LRClib (and optionally Musixmatch).
+
+Supported platforms: Linux (MPRIS/D-Bus), Windows (SMTC/WinRT).
 
 Entry point: ``python -m src.main`` or ``python src/main.py``
 """
@@ -14,7 +16,7 @@ import argparse
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
-from player.mpris import MprisListener
+from player import MprisListener
 from lyrics.manager import LyricsManager, LyricsResult
 from config.settings import Settings
 from ui.overlay import OverlayWindow

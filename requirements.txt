@@ -1,3 +1,7 @@
 PySide6>=6.6
-dbus-python>=1.3
 httpx>=0.25
+# Linux / macOS: D-Bus MPRIS listener
+dbus-python>=1.3; sys_platform == "linux"
+# Windows: WinRT System Media Transport Controls listener
+winrt-runtime>=2.0; sys_platform == "win32"
+winrt-Windows.Media.Control>=2.0; sys_platform == "win32"

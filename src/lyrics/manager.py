@@ -7,7 +7,9 @@ result is wrong.
 
 import hashlib
 import json
+import os
 import sqlite3
+import sys
 import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,7 +19,25 @@ from PySide6.QtCore import QObject, QThread, Qt, Signal
 from .lrclib import get_lrclib, search_all, LrcLibResult
 from .lrc_parser import ParsedLRC, parse_lrc
 
-CACHE_DIR = Path.home() / ".cache" / "lyricaod"
+
+def _get_cache_dir() -> Path:
+    """Return the platform-appropriate cache directory for lyricaod.
+
+    - Windows:     ``%LOCALAPPDATA%\\lyricaod``
+    - Linux/macOS: ``~/.cache/lyricaod``
+    """
+    if sys.platform == "win32":
+        base = Path(
+            os.environ.get(
+                "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")
+            )
+        )
+    else:
+        base = Path.home() / ".cache"
+    return base / "lyricaod"
+
+
+CACHE_DIR = _get_cache_dir()
 CACHE_FORMAT_VERSION = 2
 
 
