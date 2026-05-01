@@ -1,0 +1,217 @@
+"""
+Lyricaod — Desktop Lyrics Overlay for KDE Plasma.
+
+Displays synced / unsynced lyrics as a transparent overlay on top of
+all other windows, sourced from LRClib (and optionally Musixmatch).
+
+Entry point: ``python -m src.main`` or ``python src/main.py``
+"""
+
+import sys
+import signal
+import argparse
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+
+from player.mpris import MprisListener
+from lyrics.manager import LyricsManager, LyricsResult
+from config.settings import Settings
+from ui.overlay import OverlayWindow
+from ui.tray import TrayIcon
+
+
+class Application:
+    """Orchestrates MPRIS listener, lyrics fetching, UI overlay, and tray."""
+
+    def __init__(self):
+        self._qapp = QApplication(sys.argv)
+        self._qapp.setQuitOnLastWindowClosed(False)
+        self._qapp.setApplicationName("Lyricaod")
+        self._qapp.setOrganizationName("lyricaod")
+
+        # Core services (order matters: wire signals before MPRIS scan)
+        self.settings = Settings()
+        self.lyrics = LyricsManager(
+            ttl_days=self.settings.get("cache.ttl_days", 30),
+            max_entries=self.settings.get("cache.max_entries", 10000),
+        )
+
+        self.lyrics.lyrics_ready.connect(self._on_lyrics_ready)
+        self.lyrics.lyrics_not_found.connect(self._on_lyrics_not_found)
+        self.settings.changed.connect(self._on_settings_changed)
+
+        # MPRIS (constructor triggers initial player scan → signals fire)
+        self.mpris = MprisListener()
+        self.mpris.metadata_changed.connect(self._on_metadata_changed)
+        self.mpris.position_changed.connect(self._on_position_changed)
+        self.mpris.active_player_changed.connect(self._on_active_player_changed)
+
+        # UI (tray connects to mpris signals internally)
+        self.overlay = OverlayWindow(self.settings)
+        self.overlay.alternative_selected.connect(self.on_select_alternative)
+        self.overlay.closed.connect(self._on_overlay_closed)
+        self.overlay.resync_requested.connect(self._on_resync_requested)
+        self.tray = TrayIcon.create(self)
+
+        # Show overlay (unless start_minimized)
+        if not self.settings.get("behavior.start_minimized", False):
+            self.overlay.set_always_on_top(
+                self.settings.get("behavior.always_on_top", True)
+            )
+            self.overlay.show()
+            # Defer positioning: Wayland may ignore geometry set before show
+            QTimer.singleShot(0, self._position_overlay)
+            # Then restore user-saved position (overrides anchor if enabled)
+            QTimer.singleShot(10, self.overlay.restore_position)
+
+    # ------------------------------------------------------------------
+    #  Signal handlers
+    # ------------------------------------------------------------------
+
+    def _on_metadata_changed(self, metadata: dict):
+        artist = metadata.get("artist", "")
+        title = metadata.get("title", "")
+        album = metadata.get("album", "")
+        trackid = metadata.get("trackid", "")
+        length_ms = metadata.get("length_ms", 0)
+        print(f"[Main] meta → artist=\"{artist}\" title=\"{title}\" album=\"{album}\"")
+        self.overlay.set_seek(0, length_ms)
+        if title:
+            self.overlay.set_loading(True)
+            try:
+                self.lyrics.fetch_lyrics(artist, title, album, trackid, length_ms)
+            except Exception as exc:
+                print(f"[Main] fetch_lyrics error: {exc}")
+                self.overlay.set_loading(False)
+
+    def _on_position_changed(self, position_ms: int):
+        self.overlay.set_position(position_ms)
+        self.overlay.set_seek(position_ms, self.overlay._seek_length)
+
+    def _on_active_player_changed(self, bus_name: str):
+        meta = self.mpris.get_current_metadata()
+        if meta:
+            self._on_metadata_changed(meta)
+        else:
+            self.overlay.set_plain_text("Waiting for media…")
+
+    def _on_lyrics_ready(self, result: LyricsResult):
+        lyrics = result.primary
+        self.overlay.set_loading(False)
+        if lyrics.synced and lyrics.lrc:
+            self.overlay.set_lyrics_data(lyrics.lrc, synced=True)
+        elif lyrics.plain_text:
+            self.overlay.set_plain_text(lyrics.plain_text)
+        else:
+            self.overlay.set_plain_text("(instrumental)")
+        self.overlay.set_alternatives(result.alternatives)
+
+    def _on_lyrics_not_found(self, artist, title):
+        self.overlay.set_loading(False)
+        self.overlay.set_alternatives([])
+        if title:
+            self.overlay.set_plain_text(f"No lyrics found for {title}")
+        else:
+            self.overlay.set_plain_text("Waiting for media…")
+
+    def _on_settings_changed(self):
+        # Only reposition if the user hasn't manually placed the window
+        if not self.settings.get("behavior.remember_position", True):
+            self._position_overlay()
+        self.overlay._shrink_to_content()
+        self.overlay.update()
+
+    def on_reload(self, metadata: dict):
+        """Public entry point for tray 'Reload Lyrics' action."""
+        self._on_metadata_changed(metadata)
+
+    def _on_overlay_closed(self):
+        """Hide the overlay and sync the tray checkbox."""
+        self.overlay.hide()
+        if self.tray:
+            self.tray.set_show_checked(False)
+
+    def _on_resync_requested(self):
+        """Reload lyrics for the current track (triggered by overlay resync button)."""
+        self.overlay.set_loading(True)
+        meta = self.mpris.get_current_metadata()
+        if meta:
+            self._on_metadata_changed(meta)
+        else:
+            self.overlay.set_loading(False)
+
+    def on_select_alternative(self, index: int):
+        """Called when the user picks an alternative lyrics result in the overlay."""
+        data = self.lyrics.select_alternative(index)
+        if data and data.synced and data.lrc:
+            self.overlay.set_lyrics_data(data.lrc, synced=True)
+            # Refresh alternatives list (old primary is now in the alternatives)
+            self.overlay.set_alternatives(self.lyrics._cached_alternatives)
+        elif data and data.plain_text:
+            self.overlay.set_plain_text(data.plain_text)
+            self.overlay.set_alternatives(self.lyrics._cached_alternatives)
+
+    # ------------------------------------------------------------------
+    #  Window positioning
+    # ------------------------------------------------------------------
+
+    def _position_overlay(self):
+        screens = self._qapp.screens()
+        idx = min(self.settings.get("window.screen_index", 0), len(screens) - 1)
+        screen = screens[idx]
+        geo = screen.availableGeometry()
+
+        width = int(geo.width() * self.settings.get("window.width_pct", 60) / 100)
+        height = self.settings.get("window.height_px", 300)
+        anchor = self.settings.get("window.anchor", "bottom-center")
+        ox = self.settings.get("window.offset_x", 0)
+        oy = self.settings.get("window.offset_y", -100)
+
+        # X coordinate
+        if "left" in anchor:
+            x = geo.x() + ox
+        elif "right" in anchor:
+            x = geo.x() + geo.width() - width + ox
+        else:  # center variants
+            x = geo.x() + (geo.width() - width) // 2 + ox
+
+        # Y coordinate
+        if "top" in anchor:
+            y = geo.y() + oy
+        elif "bottom" in anchor:
+            y = geo.y() + geo.height() - height + oy
+        else:  # center
+            y = geo.y() + (geo.height() - height) // 2 + oy
+
+        self.overlay.setGeometry(x, y, width, height)
+
+    # ------------------------------------------------------------------
+
+    def run(self) -> int:
+        return self._qapp.exec()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Lyricaod — Desktop Lyrics Overlay")
+    parser.add_argument(
+        "--minimized",
+        action="store_true",
+        help="Start with the overlay hidden (tray icon only).",
+    )
+    args = parser.parse_args()
+
+    app = Application()
+
+    # Ctrl+C in the terminal quits cleanly
+    signal.signal(signal.SIGINT, lambda sig, frame: app._qapp.quit())
+
+    if args.minimized:
+        app.overlay.hide()
+        if app.tray:
+            app.tray.set_show_checked(False)
+    sys.exit(app.run())
+
+
+if __name__ == "__main__":
+    main()

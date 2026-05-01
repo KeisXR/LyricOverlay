@@ -1,0 +1,334 @@
+"""Lyrics fetching orchestrator with SQLite caching.
+
+Fetches lyrics from configured sources (LRClib first) and caches results.
+Also returns alternative matches so the user can switch if the primary
+result is wrong.
+"""
+
+import hashlib
+import json
+import sqlite3
+import time as _time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from PySide6.QtCore import QObject, QThread, Qt, Signal
+
+from .lrclib import search_all, LrcLibResult
+from .lrc_parser import ParsedLRC, parse_lrc
+
+CACHE_DIR = Path.home() / ".cache" / "lyricaod"
+CACHE_FORMAT_VERSION = 2
+
+
+@dataclass
+class LyricsData:
+    artist: str
+    title: str
+    synced: bool
+    lrc: ParsedLRC | None
+    plain_text: str | None
+    source: str
+
+
+@dataclass
+class LyricsResult:
+    """Primary result + alternatives for the same search."""
+    primary: LyricsData
+    alternatives: list[LyricsData] = field(default_factory=list)
+
+
+class _FetcherThread(QThread):
+    """Fetches lyrics from LRClib in a background thread."""
+
+    finished_ok = Signal(object)  # list[LrcLibResult]
+    finished_error = Signal(str)
+
+    def __init__(
+        self,
+        artist: str,
+        title: str,
+        album: str,
+        duration_ms: int,
+        parent: QObject | None = None,
+    ):
+        super().__init__(parent)
+        self._artist = artist
+        self._title = title
+        self._album = album
+        self._duration_ms = duration_ms
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        if self._cancel:
+            return
+        try:
+            results = search_all(
+                self._artist, self._title, self._album, self._duration_ms
+            )
+            if self._cancel:
+                return
+            if results:
+                names = [r.track_name for r in results]
+                print(f"[LRClib] {len(results)} result(s): {names}")
+            else:
+                print(f"[LRClib] no results for \"{self._title}\" by \"{self._artist}\"")
+            self.finished_ok.emit(results)
+        except Exception as exc:
+            if not self._cancel:
+                self.finished_error.emit(str(exc))
+
+
+class LyricsManager(QObject):
+    """High-level API for fetching lyrics with alternative results."""
+
+    lyrics_ready = Signal(LyricsResult)
+    lyrics_not_found = Signal(str, str)
+
+    def __init__(
+        self,
+        ttl_days: int = 30,
+        max_entries: int = 10000,
+        parent: QObject | None = None,
+    ):
+        super().__init__(parent)
+        self._ttl_days = ttl_days
+        self._max_entries = max_entries
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        self._conn = sqlite3.connect(str(CACHE_DIR / "cache.db"))
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._init_db()
+        self._worker: _FetcherThread | None = None
+        self._req_id = 0
+        self._last_search_key = ""  # cache key of current search
+        self._cached_alternatives: list[LyricsData] = []
+
+    # ------------------------------------------------------------------
+    #  Database
+    # ------------------------------------------------------------------
+
+    def _init_db(self):
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cache (
+                key TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                fetched_at REAL NOT NULL
+            )
+            """
+        )
+        self._conn.commit()
+        # TTL cleanup
+        cutoff = _time.time() - self._ttl_days * 86400
+        self._conn.execute("DELETE FROM cache WHERE fetched_at < ?", (cutoff,))
+        self._conn.commit()
+        # LRU eviction
+        self._enforce_max_entries()
+
+    def _enforce_max_entries(self):
+        max_entries = self._max_entries
+        count_row = self._conn.execute("SELECT COUNT(*) FROM cache").fetchone()
+        count = count_row[0] if count_row else 0
+        if count > max_entries:
+            to_delete = count - max_entries
+            self._conn.execute(
+                "DELETE FROM cache WHERE key IN ("
+                "  SELECT key FROM cache ORDER BY fetched_at ASC LIMIT ?"
+                ")", (to_delete,)
+            )
+            self._conn.commit()
+
+    def _make_key(self, artist: str, title: str, trackid: str = "") -> str:
+        raw = f"{artist}|{title}|{trackid}"
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    @staticmethod
+    def _dict_to_lyrics_data(entry: dict) -> LyricsData:
+        lrc = None
+        if entry.get("lrc_raw"):
+            lrc = parse_lrc(entry["lrc_raw"])
+        return LyricsData(
+            artist=entry["artist"],
+            title=entry["title"],
+            synced=entry["synced"],
+            lrc=lrc,
+            plain_text=entry.get("plain_text"),
+            source=entry.get("source", "cache"),
+        )
+
+    @staticmethod
+    def _lyrics_data_to_dict(data: LyricsData) -> dict:
+        lrc_raw = LyricsManager._lrc_to_raw(data.lrc) if data.lrc else ""
+        return {
+            "artist": data.artist,
+            "title": data.title,
+            "synced": data.synced,
+            "plain_text": data.plain_text,
+            "lrc_raw": lrc_raw,
+            "source": data.source,
+        }
+
+    def _get_cached(self, key: str) -> tuple[LyricsData | None, list[LyricsData]]:
+        """Return (primary, alternatives) from cache, or (None, [])."""
+        row = self._conn.execute(
+            "SELECT data FROM cache WHERE key = ?", (key,)
+        ).fetchone()
+        if not row:
+            return None, []
+        payload = json.loads(row[0])
+
+        # New format: {primary: {...}, alternatives: [...]}
+        if isinstance(payload, dict) and "primary" in payload:
+            if payload.get("version") != CACHE_FORMAT_VERSION:
+                return None, []
+            primary = self._dict_to_lyrics_data(payload["primary"])
+            alternatives = [
+                self._dict_to_lyrics_data(a)
+                for a in payload.get("alternatives", [])
+            ]
+            return primary, alternatives
+
+        # Old format (backward compatibility): direct lyrics data dict
+        return None, []
+
+    def _put_cache(self, key: str, primary: LyricsData, alternatives: list[LyricsData]):
+        payload = {
+            "version": CACHE_FORMAT_VERSION,
+            "primary": self._lyrics_data_to_dict(primary),
+            "alternatives": [self._lyrics_data_to_dict(a) for a in alternatives],
+        }
+        data = json.dumps(payload, ensure_ascii=False)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO cache (key, data, fetched_at) VALUES (?, ?, ?)",
+            (key, data, _time.time()),
+        )
+        self._conn.commit()
+        self._enforce_max_entries()
+
+    @staticmethod
+    def _lrc_to_raw(lrc: ParsedLRC) -> str:
+        parts: list[str] = []
+        if lrc.title:
+            parts.append(f"[ti:{lrc.title}]")
+        if lrc.artist:
+            parts.append(f"[ar:{lrc.artist}]")
+        if lrc.offset_ms:
+            parts.append(f"[offset:{lrc.offset_ms}]")
+        for line in lrc.lines:
+            timestamp_ms = line.timestamp_ms - lrc.offset_ms
+            mins = timestamp_ms // 60000
+            secs = (timestamp_ms % 60000) / 1000
+            parts.append(f"[{mins:02d}:{secs:05.2f}]{line.text}")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _convert_lrclib_result(result: LrcLibResult) -> LyricsData:
+        if result.synced_lyrics:
+            lrc = parse_lrc(result.synced_lyrics)
+            return LyricsData(
+                artist=result.artist_name,
+                title=result.track_name,
+                synced=True,
+                lrc=lrc,
+                plain_text=result.plain_lyrics,
+                source="lrclib",
+            )
+        return LyricsData(
+            artist=result.artist_name,
+            title=result.track_name,
+            synced=False,
+            lrc=None,
+            plain_text=result.plain_lyrics,
+            source="lrclib",
+        )
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+
+    def fetch_lyrics(
+        self,
+        artist: str,
+        title: str,
+        album: str = "",
+        trackid: str = "",
+        duration_ms: int = 0,
+    ):
+        print(f"[Lyrics] search: title=\"{title}\" artist=\"{artist}\" album=\"{album}\"")
+
+        if not title:
+            self.lyrics_not_found.emit(artist, title)
+            return
+
+        # 1. Cache check
+        key = self._make_key(artist, title, trackid)
+        cached, cached_alts = self._get_cached(key)
+        if cached:
+            self._cached_alternatives = cached_alts
+            result = LyricsResult(primary=cached, alternatives=cached_alts)
+            self.lyrics_ready.emit(result)
+            return
+
+        # 2. Bump request ID
+        self._req_id += 1
+        req_id = self._req_id
+
+        # 3. Cancel previous worker
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._worker.wait(2000)
+
+        # 4. Start fetch
+        self._worker = _FetcherThread(artist, title, album, duration_ms, self)
+        self._worker.finished_ok.connect(
+            lambda results, a=artist, t=title, k=key, rid=req_id:
+                self._on_fetch_done(results, a, t, k, rid),
+            type=Qt.ConnectionType.QueuedConnection,
+        )
+        self._worker.finished_error.connect(
+            lambda msg, a=artist, t=title, rid=req_id:
+                self._on_fetch_error(a, t, rid),
+            type=Qt.ConnectionType.QueuedConnection,
+        )
+        self._worker.start()
+
+    def _on_fetch_done(self, results: list, artist, title, key, req_id):
+        if req_id != self._req_id:
+            return
+        if not results:
+            print(f"[Lyrics] not found: \"{title}\" by \"{artist}\"")
+            self._cached_alternatives = []
+            self._last_search_key = key
+            self.lyrics_not_found.emit(artist, title)
+            return
+
+        primary = self._convert_lrclib_result(results[0])
+        alternatives = [self._convert_lrclib_result(r) for r in results[1:]]
+        self._put_cache(key, primary, alternatives)
+        self._cached_alternatives = alternatives
+        self._last_search_key = key
+
+        print(f"[Lyrics] primary: \"{primary.title}\" by \"{primary.artist}\" +{len(alternatives)} alt(s)")
+        self.lyrics_ready.emit(LyricsResult(primary=primary, alternatives=alternatives))
+
+    def _on_fetch_error(self, artist, title, req_id):
+        if req_id != self._req_id:
+            return
+        self._cached_alternatives = []
+        self.lyrics_not_found.emit(artist, title)
+
+    def select_alternative(self, index: int) -> LyricsData | None:
+        """Switch to an alternative (0 = first alternative).
+        The previously displayed lyrics become an alternative, ensuring the
+        swap is reversible."""
+        if 0 <= index < len(self._cached_alternatives):
+            self._cached_alternatives[0], self._cached_alternatives[index] = (
+                self._cached_alternatives[index],
+                self._cached_alternatives[0],
+            )
+            return self._cached_alternatives[0]
+        return None
