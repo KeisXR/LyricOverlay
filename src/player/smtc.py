@@ -8,6 +8,7 @@ Requires: winrt-runtime, winrt-Windows.Media.Control
 """
 
 import asyncio
+import datetime
 import time
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
@@ -60,7 +61,31 @@ async def _query_smtc() -> dict | None:
     length_ms = 0
     if timeline:
         try:
-            pos_ms = round(timeline.position.total_seconds() * 1000)
+            raw_pos_s = timeline.position.total_seconds()
+            # SMTC reports a static snapshot of the position as of the last time
+            # the app called SetTimelineProperties.  Advance it by the elapsed
+            # wall-clock time since that update so every poll returns the true
+            # current playback position instead of a frozen value.
+            try:
+                last_updated = timeline.last_updated_time
+                # winrt maps Windows.Foundation.DateTime to a UTC-aware
+                # datetime.datetime; the tzinfo guard handles any rare case
+                # where a naive datetime is returned.
+                if hasattr(last_updated, "tzinfo") and last_updated.tzinfo is None:
+                    last_updated = last_updated.replace(tzinfo=datetime.timezone.utc)
+                now_utc = datetime.datetime.now(datetime.timezone.utc)
+                elapsed_s = (now_utc - last_updated).total_seconds()
+                if elapsed_s < 0:
+                    # Clock skew or timezone mismatch — skip the adjustment.
+                    print(
+                        f"[SMTC] last_updated_time is in the future by"
+                        f" {-elapsed_s:.3f}s; skipping position advance"
+                    )
+                    elapsed_s = 0.0
+                pos_ms = round((raw_pos_s + elapsed_s * rate) * 1000)
+            except (AttributeError, TypeError, OverflowError) as exc:
+                print(f"[SMTC] Could not advance position via last_updated_time: {exc}")
+                pos_ms = round(raw_pos_s * 1000)
         except Exception:
             pass
         try:
@@ -236,15 +261,36 @@ class SmtcListener(QObject):
             self.metadata_changed.emit(new_meta)
 
         # --- Playback status ---
+        prev_status = self._status
         if status != self._status:
             self._status = status
             self.playback_state_changed.emit(status, app_id)
 
         # --- Sync position clock ---
+        # Only reset the interpolation anchor when necessary:
+        #   • the first time we see a Playing state (_position_time == 0)
+        #   • transitioning into Playing from a non-Playing state (e.g. resume)
+        #   • the reported position diverges significantly from interpolated
+        #     position, indicating the user performed a seek
+        # This prevents the anchor being reset every 500 ms poll cycle to the
+        # same stale SMTC snapshot value, which would freeze the seek bar.
+        _SEEK_THRESHOLD_MS = 1500
         if status == "Playing":
             self._playback_rate = rate
-            self._position_ms = pos_ms
-            self._position_time = time.monotonic()
+            if self._position_time > 0 and prev_status == "Playing":
+                elapsed = (
+                    (time.monotonic() - self._position_time)
+                    * 1000.0
+                    * self._playback_rate
+                )
+                expected_ms = self._position_ms + round(elapsed)
+                if abs(pos_ms - expected_ms) > _SEEK_THRESHOLD_MS:
+                    self._position_ms = pos_ms
+                    self._position_time = time.monotonic()
+            else:
+                # First sync or resuming from Paused/Stopped
+                self._position_ms = pos_ms
+                self._position_time = time.monotonic()
 
     # ------------------------------------------------------------------
     #  Position interpolation
