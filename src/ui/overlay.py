@@ -32,6 +32,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget, QMenu
 
 from lyrics.lrc_parser import ParsedLRC, find_current_line
+from ui.color_utils import color_from_setting
 
 
 class OverlayWindow(QWidget):
@@ -39,6 +40,7 @@ class OverlayWindow(QWidget):
 
     closed = Signal()
     alternative_selected = Signal(int)
+    alternatives_requested = Signal()
     resync_requested = Signal()
 
     def __init__(self, settings, parent: QWidget | None = None):
@@ -60,6 +62,7 @@ class OverlayWindow(QWidget):
 
         # Alternatives
         self._alternatives: list = []
+        self._alternatives_loading = False
         self._alt_menu_rect = QRect()
 
         # Hover state
@@ -142,7 +145,8 @@ class OverlayWindow(QWidget):
 
     def leaveEvent(self, event):
         self._hover = False
-        self._hide_timer.start()
+        if self._settings.get("behavior.auto_hide_controls", True):
+            self._hide_timer.start()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent):
@@ -153,8 +157,11 @@ class OverlayWindow(QWidget):
             if self._resync_btn_rect.contains(event.pos()) and self._controls_opacity > 0.5:
                 self.resync_requested.emit()
                 return
-            if self._alt_menu_rect.contains(event.pos()) and self._alternatives:
-                self._show_alternatives_menu()
+            if self._alt_menu_rect.contains(event.pos()) and self._controls_opacity > 0.5:
+                if self._alternatives:
+                    self._show_alternatives_menu()
+                elif not self._alternatives_loading:
+                    self.alternatives_requested.emit()
                 return
             wh = self.windowHandle()
             if wh:
@@ -190,6 +197,9 @@ class OverlayWindow(QWidget):
             self.show()
         else:
             self.hide()
+
+    def set_hide_delay(self, delay_ms: int):
+        self._hide_timer.setInterval(max(0, delay_ms))
 
     def _save_position(self):
         if self.is_wayland():
@@ -238,6 +248,10 @@ class OverlayWindow(QWidget):
 
     def set_alternatives(self, alternatives: list):
         self._alternatives = alternatives
+        self.update()
+
+    def set_alternatives_loading(self, loading: bool):
+        self._alternatives_loading = loading
         self.update()
 
     def set_loading(self, loading: bool):
@@ -300,8 +314,9 @@ class OverlayWindow(QWidget):
         hint_alpha = 0.15  # low-opacity hint for alternatives indicator
 
         if use_bg:
-            bg_color = QColor(
-                self._settings.get("window.background_color", "rgba(0,0,0,0.45)")
+            bg_color = color_from_setting(
+                self._settings.get("window.background_color", "rgba(0,0,0,0.45)"),
+                "rgba(0,0,0,0.45)",
             )
         else:
             bg_color = QColor(0, 0, 0, 0)
@@ -323,12 +338,15 @@ class OverlayWindow(QWidget):
         fm = QFontMetrics(font)
         line_h = fm.lineSpacing()
 
-        text_color = QColor(self._settings.get("window.text_color", "#ffffff"))
-        shadow_color = QColor(
-            self._settings.get("window.text_shadow_color", "rgba(0,0,0,0.6)")
+        text_color = color_from_setting(
+            self._settings.get("window.text_color", "#ffffff"), "#ffffff"
         )
-        highlight_color = QColor(
-            self._settings.get("window.highlight_color", "#ffcc00")
+        shadow_color = color_from_setting(
+            self._settings.get("window.text_shadow_color", "rgba(0,0,0,0.6)"),
+            "rgba(0,0,0,0.6)",
+        )
+        highlight_color = color_from_setting(
+            self._settings.get("window.highlight_color", "#ffcc00"), "#ffcc00"
         )
 
         visible = min(
@@ -390,8 +408,8 @@ class OverlayWindow(QWidget):
         self._draw_controls(painter)
         painter.setOpacity(1.0)
 
-        # --- Alternatives hint (always visible at low opacity when available) ---
-        if self._alternatives and self._controls_opacity < 0.6:
+        # --- Alternatives hint (always visible at low opacity when lyrics shown) ---
+        if self._display_lines and self._controls_opacity < 0.6:
             self._draw_alt_hint(painter)
 
         # --- Seek bar ---
@@ -418,11 +436,15 @@ class OverlayWindow(QWidget):
         self._resync_btn_rect = QRect(resync_x, btn_y, 22, 22)
         painter.drawText(self._resync_btn_rect, Qt.AlignmentFlag.AlignCenter, "⟳")
 
-        # Alternatives button (when hovered, full opacity)
-        if self._alternatives:
+        # Alternatives button (always shown when lyrics are displayed)
+        if self._display_lines:
             alt_x = resync_x - 30
             self._alt_menu_rect = QRect(alt_x, btn_y, 22, 22)
-            painter.drawText(self._alt_menu_rect, Qt.AlignmentFlag.AlignCenter, "⇄")
+            if self._alternatives_loading:
+                painter.setPen(QPen(QColor(255, 255, 255, 100)))
+                painter.drawText(self._alt_menu_rect, Qt.AlignmentFlag.AlignCenter, "…")
+            else:
+                painter.drawText(self._alt_menu_rect, Qt.AlignmentFlag.AlignCenter, "⇄")
         else:
             self._alt_menu_rect = QRect()
 

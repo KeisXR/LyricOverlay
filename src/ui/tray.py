@@ -4,6 +4,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QFontDialog, QMenu, QSystemTrayIcon
 
+from ui.settings_dialog import SettingsDialog
+
 
 def _make_icon() -> QIcon:
     pix = QPixmap(64, 64)
@@ -46,11 +48,15 @@ class TrayIcon(QSystemTrayIcon):
     def _setup_menu(self):
         self._menu = QMenu()
 
-        self._show_action = QAction("Show Lyrics")
+        self._show_action = QAction("Show Lyrics", self)
         self._show_action.setCheckable(True)
         self._show_action.setChecked(True)
         self._show_action.triggered.connect(self._toggle_visibility)
         self._menu.addAction(self._show_action)
+
+        settings_action = QAction("Settings...", self)
+        settings_action.triggered.connect(self._open_settings)
+        self._menu.addAction(settings_action)
 
         self._menu.addSeparator()
 
@@ -110,13 +116,13 @@ class TrayIcon(QSystemTrayIcon):
 
         self._menu.addSeparator()
 
-        reload_action = QAction("Reload Lyrics")
+        reload_action = QAction("Reload Lyrics", self)
         reload_action.triggered.connect(self._reload_lyrics)
         self._menu.addAction(reload_action)
 
         self._menu.addSeparator()
 
-        quit_action = QAction("Quit")
+        quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.quit)
         self._menu.addAction(quit_action)
 
@@ -152,6 +158,7 @@ class TrayIcon(QSystemTrayIcon):
             action.setChecked(action.text() == active_name)
 
     def _select_player(self, name: str):
+        self._app.settings.set("behavior.pinned_player", name)
         self._app.mpris.pin_player(name)
         self._update_player_menu_checks(name)
 
@@ -159,6 +166,15 @@ class TrayIcon(QSystemTrayIcon):
         meta = self._app.mpris.get_current_metadata()
         if meta:
             self._app.on_reload(meta)
+
+    def _open_settings(self):
+        dialog = getattr(self._app, "settings_dialog", None)
+        if dialog is None:
+            dialog = SettingsDialog(self._app)
+            self._app.settings_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _choose_font(self):
         current = self._app.settings.get("window.font_family", "sans-serif")

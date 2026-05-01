@@ -35,14 +35,20 @@ class Application:
         self.lyrics = LyricsManager(
             ttl_days=self.settings.get("cache.ttl_days", 30),
             max_entries=self.settings.get("cache.max_entries", 10000),
+            lrclib_enabled=self.settings.get("sources.lrclib.enabled", True),
         )
 
         self.lyrics.lyrics_ready.connect(self._on_lyrics_ready)
         self.lyrics.lyrics_not_found.connect(self._on_lyrics_not_found)
+        self.lyrics.alternatives_ready.connect(self._on_alternatives_ready)
         self.settings.changed.connect(self._on_settings_changed)
+        self._current_meta: dict = {}
 
         # MPRIS (constructor triggers initial player scan → signals fire)
         self.mpris = MprisListener()
+        pinned_player = self.settings.get("behavior.pinned_player")
+        if pinned_player:
+            self.mpris.pin_player(pinned_player)
         self.mpris.metadata_changed.connect(self._on_metadata_changed)
         self.mpris.position_changed.connect(self._on_position_changed)
         self.mpris.active_player_changed.connect(self._on_active_player_changed)
@@ -50,6 +56,7 @@ class Application:
         # UI (tray connects to mpris signals internally)
         self.overlay = OverlayWindow(self.settings)
         self.overlay.alternative_selected.connect(self.on_select_alternative)
+        self.overlay.alternatives_requested.connect(self._on_alternatives_requested)
         self.overlay.closed.connect(self._on_overlay_closed)
         self.overlay.resync_requested.connect(self._on_resync_requested)
         self.tray = TrayIcon.create(self)
@@ -70,6 +77,7 @@ class Application:
     # ------------------------------------------------------------------
 
     def _on_metadata_changed(self, metadata: dict):
+        self._current_meta = metadata
         artist = metadata.get("artist", "")
         title = metadata.get("title", "")
         album = metadata.get("album", "")
@@ -115,7 +123,39 @@ class Application:
         else:
             self.overlay.set_plain_text("Waiting for media…")
 
+    def _on_alternatives_requested(self):
+        """User clicked the alternatives button — fetch alternatives on demand."""
+        meta = self._current_meta
+        if not meta:
+            return
+        artist = meta.get("artist", "")
+        title = meta.get("title", "")
+        if not title:
+            return
+        print(f"[Main] fetching alternatives for \"{title}\" by \"{artist}\"")
+        self.overlay.set_alternatives_loading(True)
+        self.lyrics.fetch_alternatives(
+            artist,
+            title,
+            meta.get("album", ""),
+            meta.get("length_ms", 0),
+        )
+
+    def _on_alternatives_ready(self, alternatives: list):
+        self.overlay.set_alternatives_loading(False)
+        self.overlay.set_alternatives(alternatives)
+        if alternatives:
+            self.overlay._show_alternatives_menu()
+
     def _on_settings_changed(self):
+        self.lyrics.set_lrclib_enabled(
+            self.settings.get("sources.lrclib.enabled", True)
+        )
+        self.lyrics.set_cache_limits(
+            self.settings.get("cache.ttl_days", 30),
+            self.settings.get("cache.max_entries", 10000),
+        )
+        self.overlay.set_hide_delay(self.settings.get("behavior.hide_delay_ms", 2000))
         # Only reposition if the user hasn't manually placed the window
         if not self.settings.get("behavior.remember_position", True):
             self._position_overlay()

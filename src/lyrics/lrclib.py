@@ -1,5 +1,6 @@
 """LRClib API client — fetch synced and plain lyrics from lrclib.net."""
 
+import asyncio
 from dataclasses import dataclass
 
 import httpx
@@ -39,10 +40,27 @@ def get_lrclib(
     duration_ms: int = 0,
     timeout: float = 10.0,
 ) -> LrcLibResult | None:
-    """Fetch the best-match lyrics from LRClib.  For multiple results use
-    :func:`search_all`."""
-    results = search_all(artist_name, track_name, album_name, duration_ms, timeout, max_results=1)
-    return results[0] if results else None
+    """Fetch the best-match lyrics from LRClib via a single direct GET /api/get.
+
+    This is the fast path — one HTTP request, no search, no alternatives.
+    """
+    params: dict[str, str] = {
+        "artist_name": artist_name,
+        "track_name": track_name,
+    }
+    if album_name:
+        params["album_name"] = album_name
+    if duration_ms:
+        params["duration"] = str(duration_ms // 1000)
+
+    with httpx.Client(timeout=timeout) as client:
+        resp = client.get(f"{LRCLIB_BASE}/get", params=params)
+        if resp.status_code == 200:
+            return _result_from_json(resp.json())
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return None
 
 
 def search_all(
@@ -53,70 +71,53 @@ def search_all(
     timeout: float = 10.0,
     max_results: int = 6,
 ) -> list[LrcLibResult]:
-    """Fetch up to *max_results* lyrics matches from LRClib.
+    """Search for lyrics matches (including alternatives) from LRClib.
 
-    Each result includes full ``synced_lyrics`` / ``plain_lyrics`` so
-    callers can show previews without extra requests.
+    Performs /api/search followed by parallel /api/get/{id} calls for
+    each result.  Use :func:`get_lrclib` for the fast single-result path.
     """
-    with httpx.Client(timeout=timeout) as client:
-        # 1. Direct get (best match when artist is known)
-        direct_hit: LrcLibResult | None = None
-        if artist_name:
-            params: dict[str, str] = {
-                "artist_name": artist_name,
-                "track_name": track_name,
-            }
-            if album_name:
-                params["album_name"] = album_name
-            if duration_ms:
-                params["duration"] = str(duration_ms // 1000)
 
-            resp = client.get(f"{LRCLIB_BASE}/get", params=params)
-            if resp.status_code == 200:
-                direct_hit = _result_from_json(resp.json())
-            elif resp.status_code != 404:
-                resp.raise_for_status()
+    async def _fetch():
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            search_params: dict[str, str] = {"track_name": track_name}
+            if artist_name:
+                search_params["artist_name"] = artist_name
+            resp = await client.get(
+                f"{LRCLIB_BASE}/search", params=search_params
+            )
+            resp.raise_for_status()
+            hits = resp.json()
+            if not isinstance(hits, list) or not hits:
+                return []
 
-        # 2. Search (always, so we can build the alternatives list)
-        search_params: dict[str, str] = {"track_name": track_name}
-        if artist_name:
-            search_params["artist_name"] = artist_name
-        resp = client.get(f"{LRCLIB_BASE}/search", params=search_params)
-        resp.raise_for_status()
-        hits = resp.json()
-        if not isinstance(hits, list) or not hits:
-            return [direct_hit] if direct_hit else []
+            ordered = []
+            for h in hits:
+                if h.get("id"):
+                    ordered.append(h)
+                if len(ordered) >= max_results:
+                    break
 
-        # Collect IDs — direct hit first (deduplicated)
-        seen_ids: set[int] = set()
-        ordered: list[dict] = []
-        if direct_hit and direct_hit.id:
-            seen_ids.add(direct_hit.id)
-            ordered.append({
-                "id": direct_hit.id,
-                "trackName": direct_hit.track_name,
-                "artistName": direct_hit.artist_name,
-            })
+            if not ordered:
+                return []
 
-        for h in hits:
-            rid = h.get("id", 0)
-            if rid and rid not in seen_ids:
-                seen_ids.add(rid)
-                ordered.append(h)
-            if len(ordered) >= max_results:
-                break
+            fetch_tasks = [
+                client.get(f"{LRCLIB_BASE}/get/{entry['id']}")
+                for entry in ordered
+            ]
+            responses = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
-        # 3. Fetch full lyrics for each ID
-        results: list[LrcLibResult] = []
-        for entry in ordered:
-            try:
-                r = client.get(f"{LRCLIB_BASE}/get/{entry['id']}")
-                r.raise_for_status()
-                results.append(_result_from_json(r.json()))
-            except httpx.HTTPError:
-                # Skip broken entries; keep going
-                continue
-            if len(results) >= max_results:
-                break
+            results: list[LrcLibResult] = []
+            for resp in responses:
+                if isinstance(resp, BaseException):
+                    continue
+                try:
+                    resp.raise_for_status()
+                    results.append(_result_from_json(resp.json()))
+                except httpx.HTTPError:
+                    continue
+                if len(results) >= max_results:
+                    break
 
-        return results
+            return results
+
+    return asyncio.run(_fetch())
