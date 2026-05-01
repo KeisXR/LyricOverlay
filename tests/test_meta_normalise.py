@@ -1,10 +1,64 @@
-"""Unit tests for normalise_yt_meta in meta_utils.py."""
+"""Unit tests for normalise_yt_meta and normalise_unicode_variants in meta_utils.py."""
 
 import sys
 
 sys.path.insert(0, "src")
 
-from meta_utils import normalise_yt_meta
+from meta_utils import normalise_yt_meta, normalise_unicode_variants
+
+
+# ---------------------------------------------------------------------------
+# normalise_unicode_variants — standalone unit tests
+# ---------------------------------------------------------------------------
+
+def test_wave_dash_to_fullwidth_tilde():
+    # 〜 (U+301C WAVE DASH) → ～ (U+FF5E FULLWIDTH TILDE)
+    assert normalise_unicode_variants("友よ 〜 この先もずっと") == "友よ ～ この先もずっと"
+
+
+def test_fullwidth_tilde_unchanged():
+    # ～ is already canonical; must not be double-converted
+    assert normalise_unicode_variants("友よ ～ この先もずっと") == "友よ ～ この先もずっと"
+
+
+def test_horizontal_ellipsis_to_dots():
+    # … (U+2026) → ...
+    assert normalise_unicode_variants("この先もずっと…") == "この先もずっと..."
+
+
+def test_midline_ellipsis_to_dots():
+    # ⋯ (U+22EF) → ...
+    assert normalise_unicode_variants("A\u22efB") == "A...B"
+
+
+def test_two_dot_leader_to_dots():
+    # ‥ (U+2025) → ..
+    assert normalise_unicode_variants("A\u2025B") == "A..B"
+
+
+def test_katakana_middle_dot_triple_to_dots():
+    # ・・・ (U+30FB × 3) → ...
+    assert normalise_unicode_variants("A\u30fb\u30fb\u30fbB") == "A...B"
+
+
+def test_katakana_middle_dot_single_unchanged():
+    # A single ・ is a legitimate separator and must not be removed
+    assert normalise_unicode_variants("A・B") == "A・B"
+
+
+def test_ketsumeis_song_title():
+    # The title as reported in the issue: YouTube sends 〜 and …, LRClib has ～ and ···
+    yt_title = "友よ 〜 この先もずっと…"
+    lrclib_title = "友よ ～ この先もずっと\u30fb\u30fb\u30fb"
+    assert normalise_unicode_variants(yt_title) == normalise_unicode_variants(lrclib_title)
+
+
+def test_plain_ascii_unchanged():
+    assert normalise_unicode_variants("Hello World") == "Hello World"
+
+
+def test_empty_string():
+    assert normalise_unicode_variants("") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +159,18 @@ if __name__ == "__main__":
     import traceback
 
     tests = [
+        # normalise_unicode_variants
+        ("wave_dash_to_fullwidth_tilde", test_wave_dash_to_fullwidth_tilde),
+        ("fullwidth_tilde_unchanged", test_fullwidth_tilde_unchanged),
+        ("horizontal_ellipsis_to_dots", test_horizontal_ellipsis_to_dots),
+        ("midline_ellipsis_to_dots", test_midline_ellipsis_to_dots),
+        ("two_dot_leader_to_dots", test_two_dot_leader_to_dots),
+        ("katakana_middle_dot_triple_to_dots", test_katakana_middle_dot_triple_to_dots),
+        ("katakana_middle_dot_single_unchanged", test_katakana_middle_dot_single_unchanged),
+        ("ketsumeis_song_title", test_ketsumeis_song_title),
+        ("plain_ascii_unchanged", test_plain_ascii_unchanged),
+        ("empty_string", test_empty_string),
+        # normalise_yt_meta
         ("strips_topic_suffix", test_strips_topic_suffix),
         ("strips_topic_suffix_case_insensitive", test_strips_topic_suffix_case_insensitive),
         ("strips_topic_suffix_with_extra_spaces", test_strips_topic_suffix_with_extra_spaces),
