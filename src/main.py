@@ -21,6 +21,7 @@ from lyrics.manager import LyricsManager, LyricsResult
 from config.settings import Settings
 from ui.overlay import OverlayWindow
 from ui.tray import TrayIcon
+from meta_utils import normalise_yt_meta
 
 
 class Application:
@@ -79,12 +80,18 @@ class Application:
     # ------------------------------------------------------------------
 
     def _on_metadata_changed(self, metadata: dict):
-        self._current_meta = metadata
         artist = metadata.get("artist", "")
         title = metadata.get("title", "")
         album = metadata.get("album", "")
         trackid = metadata.get("trackid", "")
         length_ms = metadata.get("length_ms", 0)
+
+        # Normalise YouTube Music metadata noise before searching.
+        artist, title = normalise_yt_meta(artist, title)
+
+        # Store normalised values so fetch_alternatives uses them too.
+        self._current_meta = {**metadata, "artist": artist, "title": title}
+
         print(f"[Main] meta → artist=\"{artist}\" title=\"{title}\" album=\"{album}\"")
         self.overlay.set_seek(0, length_ms)
         if title:
