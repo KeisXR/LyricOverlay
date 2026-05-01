@@ -91,6 +91,26 @@ class _FetchPrimaryThread(QThread):
             )
             if self._cancel:
                 return
+
+            # If the direct lookup failed (404), fall back to a title-only
+            # search so that artists with non-ASCII chars (e.g. Greek Lambda Λ)
+            # can still be resolved.
+            if result is None and self._artist:
+                print(
+                    f"[LRClib] direct lookup failed, trying title-only search"
+                    f" for \"{self._title}\""
+                )
+                fallbacks = search_all(
+                    "",
+                    self._title,
+                    self._album,
+                    self._duration_ms,
+                    max_results=1,
+                )
+                if self._cancel:
+                    return
+                result = fallbacks[0] if fallbacks else None
+
             if result:
                 print(f"[LRClib] found: \"{result.track_name}\" by \"{result.artist_name}\"")
             else:

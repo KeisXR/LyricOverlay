@@ -87,6 +87,21 @@ def search_all(
             )
             resp.raise_for_status()
             hits = resp.json()
+
+            # If the artist-scoped search returned nothing (e.g. because the
+            # artist name contains non-ASCII chars like Greek Lambda Λ that
+            # LRClib doesn't index), retry with the track name only.
+            if artist_name and (not isinstance(hits, list) or not hits):
+                print(
+                    f"[LRClib] artist search empty, retrying title-only for"
+                    f" \"{track_name}\""
+                )
+                resp = await client.get(
+                    f"{LRCLIB_BASE}/search", params={"track_name": track_name}
+                )
+                resp.raise_for_status()
+                hits = resp.json()
+
             if not isinstance(hits, list) or not hits:
                 return []
 
