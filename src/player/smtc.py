@@ -116,7 +116,7 @@ class _SmtcPollThread(QThread):
                 try:
                     state = loop.run_until_complete(_query_smtc())
                 except Exception as exc:
-                    print(f"[SMTC] poll error: {exc}")
+                    print(f"[SMTC] Failed to query SMTC session state: {exc}")
                     state = None
                 self.state_ready.emit(state)
                 self.msleep(500)
@@ -266,12 +266,15 @@ class SmtcListener(QObject):
 
     # ------------------------------------------------------------------
     #  Player pinning
-    #  SMTC always exposes a single "current" session; pinning is noted
-    #  but cannot override Windows' own session priority.
+    #  SMTC always exposes a single "current" session determined by
+    #  Windows; there is no API to force a different session to become
+    #  the active one.  These methods exist to satisfy the MprisListener
+    #  interface so the rest of the application can call them
+    #  unconditionally on any platform.
     # ------------------------------------------------------------------
 
-    def pin_player(self, bus_name: str):
-        self._pinned_player = bus_name
+    def pin_player(self, player_id: str):
+        self._pinned_player = player_id
 
     def unpin_player(self):
         self._pinned_player = ""
@@ -286,8 +289,8 @@ class SmtcListener(QObject):
     def get_active_player(self) -> str:
         return self._active_player
 
-    def get_player_status(self, bus_name: str) -> str:
-        return self._status if bus_name == self._active_player else "Unknown"
+    def get_player_status(self, player_id: str) -> str:
+        return self._status if player_id == self._active_player else "Unknown"
 
     def get_current_metadata(self) -> dict | None:
         return self._current_meta if self._current_meta else None
