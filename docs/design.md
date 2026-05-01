@@ -22,6 +22,8 @@ lyricaod/
 │   ├── ui/
 │   │   ├── __init__.py
 │   │   ├── overlay.py          # Frameless transparent window + hover controls
+│   │   ├── settings_dialog.py  # Tabbed settings dialog (live preview)
+│   │   ├── color_utils.py      # CSS rgba() string ↔ QColor conversion
 │   │   └── tray.py             # System tray icon & menu
 │   └── config/
 │       ├── __init__.py
@@ -84,10 +86,22 @@ Implemented in `mpris.py` (`_select_active()`):
 | *(future)* NetEase | Synced | Unofficial | Unknown | 3 | 📋 Planned |
 
 ### Fetch strategy
+
+**Phase 1 — Primary lyrics (fast path):**
+
 1. Check SQLite cache: key = `SHA256(artist | title | trackid)`
-2. Cache hit → return primary + alternatives immediately
-3. Cache miss → try LRClib (single source currently)
+2. Cache hit → return primary lyrics immediately (alternatives may be empty if not yet fetched)
+3. Cache miss → call LRClib `/api/get` (single HTTP request, no alternatives)
 4. All fail → show "No lyrics found" in overlay
+
+**Phase 2 — Alternatives (on-demand):**
+
+1. User clicks the ⇄ (alternatives) button in the overlay
+2. Check cache first — if alternatives are already stored from a prior fetch, show them immediately
+3. Otherwise, call LRClib `/api/search` followed by parallel `/api/get/{id}` calls via `asyncio.gather`
+4. Cache the alternatives and emit to the overlay
+
+This two-phase design keeps the initial lyrics load fast (1 request vs the old 1 + 1 + N requests) while still allowing users to explore alternative matches.
 
 ### Caching (SQLite)
 - Key: `SHA256( artist | title | trackid )`
@@ -332,7 +346,7 @@ $XDG_CACHE_HOME/lyricaod/cache.db         # SQLite lyrics cache
                                      ┌─────────────────┐
                                      │ lyrics/manager.py│
                                      │ ・check cache    │
-                                     │ ・fetch if miss  │
+                                     │ ・fetch if miss  │  ← single /api/get (fast)
                                      │ ・parse LRC      │
                                      └───────┬─────────┘
                                              │ ParsedLRC or plain text
@@ -342,10 +356,16 @@ $XDG_CACHE_HOME/lyricaod/cache.db         # SQLite lyrics cache
                                      │ ・render lyrics  │
                                      │ ・highlight line │
                                      │ ・hover controls │
-                                     └─────────────────┘
+                                     │ ・alt btn click →│
+                                     └───────┬─────────┘
                                              │
-                                             │ settings.json changed?
-                                             ▼
+                              alternatives_requested? │ settings.json changed?
+                                             ▼        ▼
+                                     ┌─────────────────┐
+                                     │ lyrics/manager.py│
+                                     │ ・fetch_alt()    │  ← /api/search + parallel /get/{id}
+                                     │ ・alternatives_ready
+                                     └─────────────────┘
                                      ┌─────────────────┐
                                      │ config/settings  │
                                      │ QFileSystemWatch │
@@ -411,8 +431,9 @@ httpx>=0.25
 | **2. Lyrics** | `lyrics/lrclib.py` + `lyrics/lrc_parser.py` + `lyrics/manager.py` + SQLite cache | ✅ Done |
 | **3. UI** | `ui/overlay.py` — frameless window, hover controls, rendering | ✅ Done |
 | **4. Integration** | Wire player → lyrics → UI. Tray icon. End-to-end working. | ✅ Done |
-| **5. Polish** | Hot-reload settings, error states, animations, Wayland support | ✅ Done |
-| **6. Future** | Musixmatch source, HTTP 429 backoff, word-level karaoke highlight, global hotkeys | 📋 Planned |
+| **5. Polish** | Hot-reload settings, error states, animations, Wayland support, GUI settings dialog, color utils | ✅ Done |
+| **6. Perf** | Single-request initial fetch, on-demand alternatives via `asyncio.gather` parallel fetches | ✅ Done |
+| **7. Future** | Musixmatch source, HTTP 429 backoff, word-level karaoke highlight, global hotkeys | 📋 Planned |
 
 ---
 

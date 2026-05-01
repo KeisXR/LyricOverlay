@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication, QFontDialog, QMenu, QSystemTrayIcon
 
+from ui.kwin_rules import set_rule_enabled
 from ui.settings_dialog import SettingsDialog
 
 
@@ -97,7 +98,10 @@ class TrayIcon(QSystemTrayIcon):
         self._menu.addAction(self._bg_action)
 
         # --- Always on Top ---
-        self._ontop_action = QAction("Always on Top")
+        label = "Always on Top"
+        if self._app.overlay.is_wayland():
+            label = "Always on Top (restart required)"
+        self._ontop_action = QAction(label)
         self._ontop_action.setCheckable(True)
         self._ontop_action.triggered.connect(self._toggle_always_on_top)
         self._menu.addAction(self._ontop_action)
@@ -221,6 +225,8 @@ class TrayIcon(QSystemTrayIcon):
     def _toggle_always_on_top(self, checked: bool):
         self._app.settings.set("behavior.always_on_top", checked)
         self._app.overlay.set_always_on_top(checked)
+        if self._app.overlay.is_wayland():
+            set_rule_enabled(checked)
 
     def _toggle_remember_pos(self, checked: bool):
         self._app.settings.set("behavior.remember_position", checked)

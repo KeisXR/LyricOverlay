@@ -120,10 +120,12 @@ settings_dialog.py or tray.py
 
 Important handlers:
 
-- `_on_metadata_changed(metadata)`: resets seekbar, shows loading, fetches lyrics.
+- `_on_metadata_changed(metadata)`: caches metadata in `_current_meta`, resets seekbar, shows loading, fetches lyrics (primary only — fast path).
 - `_on_position_changed(position_ms)`: updates current lyric line and seekbar.
 - `_on_lyrics_ready(result)`: displays synced LRC, plain lyrics, or instrumental text.
 - `_on_lyrics_not_found(artist, title)`: displays a fallback message.
+- `_on_alternatives_requested()`: triggers on-demand alternative lyrics fetch when user clicks the ⇄ button.
+- `_on_alternatives_ready(list)`: sets alternatives on the overlay and auto-opens the menu.
 - `_on_settings_changed()`: reapplies LRClib enabled state, cache limits, hide delay,
   and layout/render updates.
 - `_position_overlay()`: computes geometry from `window.screen_index`,
@@ -244,21 +246,30 @@ Metadata parsing:
 
 ### `lyrics/lrclib.py`
 
-The LRClib client uses synchronous `httpx.Client` calls inside a worker thread.
+The LRClib client has two entry points with different performance profiles:
 
-Main entry:
+**Fast path** — one HTTP request, no alternatives:
+
+```python
+get_lrclib(artist_name, track_name, album_name="", duration_ms=0, timeout=10.0)
+    -> LrcLibResult | None
+```
+
+This calls `GET /api/get` directly with query parameters. Used by
+`_FetchPrimaryThread` on every metadata change for the primary lyrics
+display.
+
+**Search path** — search + parallel fetches (on-demand alternatives):
 
 ```python
 search_all(artist_name, track_name, album_name="", duration_ms=0,
            timeout=10.0, max_results=6)
+    -> list[LrcLibResult]
 ```
 
-Fetch strategy:
-
-1. Try `/api/get` when artist is known.
-2. Always call `/api/search` to build alternatives.
-3. Deduplicate IDs.
-4. Fetch full lyrics for each result with `/api/get/{id}`.
+This uses `httpx.AsyncClient` + `asyncio.gather` to run `/api/search`
+followed by parallel `/api/get/{id}` calls. Used by `_FetchAltThread`
+only when the user clicks the alternatives button.
 
 ### `lyrics/lrc_parser.py`
 
@@ -289,10 +300,20 @@ Cache:
 
 Threading:
 
-- `_FetcherThread` subclasses `QThread`.
-- One active worker is allowed at a time.
+- Two QThread subclasses are used:
+  - `_FetchPrimaryThread`: calls `get_lrclib()` — a single direct `/api/get` call, returns one `LrcLibResult | None`. This is the fast path used on every metadata change.
+  - `_FetchAltThread`: calls `search_all()` — `/api/search` + parallel `/api/get/{id}` via `asyncio.gather`. This is used only on-demand when the user clicks the alternatives button.
+- Only one active worker is allowed at a time (primary or alt).
 - Starting a new fetch cancels and waits briefly for the previous worker.
 - Request IDs prevent stale worker results from updating UI.
+
+On-demand alternatives flow:
+
+1. User clicks alternatives (⇄) button in overlay → overlay emits `alternatives_requested`.
+2. `main.Application._on_alternatives_requested()` calls `lyrics.fetch_alternatives()`.
+3. If alternatives are already in cache (`_cached_alternatives`), they are emitted immediately.
+4. Otherwise `_FetchAltThread` fetches them, caches them via `_update_cache_alternatives()`, and emits `alternatives_ready`.
+5. `_on_alternatives_ready()` sets the alternatives on the overlay and auto-opens the menu.
 
 Alternative selection:
 
@@ -323,6 +344,7 @@ Public signals:
 
 - `closed`
 - `alternative_selected(int)`
+- `alternatives_requested` — emitted when user clicks the alternatives button and no alternatives are cached
 - `resync_requested`
 
 Primary public methods:
@@ -331,11 +353,12 @@ Primary public methods:
 - `set_plain_text(text)`
 - `set_position(position_ms)`
 - `set_alternatives(alternatives)`
+- `set_alternatives_loading(loading)` — show "…" in the alternatives button while fetching
 - `set_loading(loading)`
 - `set_seek(position_ms, length_ms)`
 - `set_always_on_top(on)`
 - `restore_position()`
-- `set_hide_delay(delay_ms)`
+- `set_hide_delay(delay_ms)` — update hide timer interval at runtime
 
 Rendering behavior:
 
@@ -353,7 +376,7 @@ Hover controls:
 
 - Close button: hides overlay via `closed`.
 - Resync button: emits `resync_requested`.
-- Alternatives button: opens a local popup menu and emits `alternative_selected`.
+- Alternatives button: if alternatives are cached, opens a popup menu and emits `alternative_selected`. If no alternatives are cached, emits `alternatives_requested` to trigger an on-demand fetch (button shows "…" while loading).
 - Dragging anywhere else starts a system move.
 
 Wayland notes:

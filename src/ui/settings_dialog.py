@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ui.color_utils import alpha_percent, color_from_setting, color_to_rgba_setting
+from ui.kwin_rules import set_rule_enabled
 
 
 class SettingsDialog(QDialog):
@@ -268,13 +269,25 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Start minimized", start_minimized)
 
-        always_on_top = self._check("behavior.always_on_top")
-        always_on_top.toggled.connect(
+        self._always_on_top = self._check("behavior.always_on_top")
+        self._always_on_top.toggled.connect(
             lambda checked: self._set(
                 "behavior.always_on_top", checked, always_on_top=True
             )
         )
-        form.addRow("Always on top", always_on_top)
+        label = "Always on top"
+        if self._app.overlay.is_wayland():
+            label = "Always on top (restart required)"
+            note = QLabel(
+                "On KDE Wayland, this updates the Lyricaod KWin rule. "
+                "Restart Lyricaod if the current overlay does not change."
+            )
+            note.setWordWrap(True)
+            note.setStyleSheet("color: palette(mid);")
+            form.addRow(label, self._always_on_top)
+            form.addRow("", note)
+        else:
+            form.addRow(label, self._always_on_top)
 
         auto_hide = self._check("behavior.auto_hide_controls")
         auto_hide.toggled.connect(
@@ -404,6 +417,8 @@ class SettingsDialog(QDialog):
             self._app._position_overlay()
         if always_on_top:
             self._app.overlay.set_always_on_top(bool(value))
+            if self._app.overlay.is_wayland():
+                set_rule_enabled(bool(value))
         if hide_delay:
             self._app.overlay.set_hide_delay(int(value))
         if key == "sources.lrclib.enabled":

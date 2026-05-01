@@ -87,17 +87,23 @@ class OverlayWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_window(self):
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-            | Qt.WindowType.WindowDoesNotAcceptFocus
-        )
+        self.setWindowTitle("Lyricaod Overlay")
+        self.setWindowFlags(self._window_flags())
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMouseTracking(True)
         self.setMinimumWidth(120)
         self.setMinimumHeight(40)
+
+    def _window_flags(self):
+        flags = (
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+        )
+        if self._settings.get("behavior.always_on_top", True):
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        return flags
 
     def _setup_hide_timer(self):
         delay = self._settings.get("behavior.hide_delay_ms", 2000)

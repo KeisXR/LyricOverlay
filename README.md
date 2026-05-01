@@ -7,13 +7,14 @@ Desktop lyrics overlay for KDE Plasma. Displays synced lyrics as a transparent, 
 - **Synced lyrics** — LRC format with line-by-line highlighting, powered by LRClib API
 - **MPRIS integration** — Auto-detects media players (Spotify, Firefox, KDE Connect, etc.) via D-Bus
 - **Transparent overlay** — Frameless, always-on-top, no taskbar entry, doesn't steal focus
-- **Hover controls** — Close, resync, and alternative lyrics buttons fade in on mouse hover
+- **Hover controls** — Close, resync, and alternative lyrics buttons fade in on mouse hover. Alternatives are fetched on-demand (one click) to keep the initial load fast.
 - **Dynamic sizing** — Window shrinks to fit displayed text (Wayland-friendly)
 - **Seekbar** — Playback progress bar with timestamp display (toggleable)
 - **Loading indicator** — Shows "⏳ Loading…" while fetching lyrics
 - **SQLite cache** — Fast offline access with TTL and LRU eviction
+- **GUI settings dialog** — Full tabbed settings (Display, Position, Sync, Behavior, Sources) with live preview
 - **Hot-reload settings** — Edit `settings.json` and changes apply instantly
-- **System tray** — Full control via tray menu (font, lines, offset, player switching)
+- **System tray** — Full control via tray menu (font, lines, offset, player switching, settings)
 
 ## Screenshot
 
@@ -73,9 +74,10 @@ python src/main.py --minimized
 | **Lyrics Offset** | ±1000 ms sync adjustment |
 | **Choose Font…** | Font picker dialog |
 | **Text Background** | Semi-transparent bg behind lyrics |
-| **Always on Top** | Window stays above other windows (X11) |
+| **Always on Top** | Window stays above other windows (X11 immediately, Wayland after restart) |
 | **Remember Position** | Save/restore window position (X11) |
 | **Show Seekbar** | Playback progress bar |
+| **Settings...** | Full GUI settings dialog (tabs: Display, Position, Sync, Behavior, Sources) |
 | **Reload Lyrics** | Re-fetch lyrics for current track |
 | **Quit** | Exit the application |
 
@@ -87,8 +89,28 @@ Hover over the overlay to reveal:
 |--------|--------|
 | **✕** (top-right) | Hide overlay |
 | **⟳** | Resync — re-fetch lyrics for current track |
-| **⇄** | Switch to alternative lyrics match |
+| **⇄** | Fetch/switch alternative lyrics (on-demand, shows "…" while loading) |
 | **Drag anywhere** | Move window (position saved on X11) |
+
+### KDE Plasma Wayland always-on-top
+
+Wayland does not let normal application windows force themselves above every
+other window. On KDE Plasma, the practical solution is a KWin Window Rule:
+
+```bash
+python scripts/install_kwin_rule.py
+```
+
+Disable the rule with:
+
+```bash
+python scripts/install_kwin_rule.py --disable
+```
+
+Restart Lyricaod after installing the rule or changing the Always on Top
+setting on Wayland. The app sets a stable Wayland app id (`lyricaod`) and
+overlay window title (`Lyricaod Overlay`) so KWin can match only the lyrics
+overlay and force `Keep above`.
 
 ## Configuration
 
@@ -139,7 +161,7 @@ Settings are stored at `~/.config/lyricaod/settings.json`. Edit the file directl
 ## Known Limitations
 
 - **Wayland absolute positioning** — Wayland protocol does not allow clients to set absolute window coordinates. `remember_position` is silently ignored on Wayland; only anchor-based placement works.
-- **Wayland always-on-top toggle** — `setWindowFlag()` changes require a window recreate that Wayland compositors may ignore.
+- **Wayland always-on-top** — Normal Qt window hints are compositor-controlled. On KDE Plasma, install the KWin rule above for reliable overlay stacking. Other Wayland compositors need compositor-specific support such as layer-shell.
 - **Musixmatch not implemented** — Only LRClib is active.
 - **No global hotkeys** — KDE Global Shortcuts D-Bus API integration is planned.
 

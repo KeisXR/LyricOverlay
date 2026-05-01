@@ -29,6 +29,7 @@ class Application:
         self._qapp.setQuitOnLastWindowClosed(False)
         self._qapp.setApplicationName("Lyricaod")
         self._qapp.setOrganizationName("lyricaod")
+        self._qapp.setDesktopFileName("lyricaod")
 
         # Core services (order matters: wire signals before MPRIS scan)
         self.settings = Settings()
