@@ -7,7 +7,9 @@ result is wrong.
 
 import hashlib
 import json
+import os
 import sqlite3
+import sys
 import time as _time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,7 +19,25 @@ from PySide6.QtCore import QObject, QThread, Qt, Signal
 from .lrclib import get_lrclib, search_all, LrcLibResult
 from .lrc_parser import ParsedLRC, parse_lrc
 
-CACHE_DIR = Path.home() / ".cache" / "lyricaod"
+
+def _get_cache_dir() -> Path:
+    """Return the platform-appropriate cache directory for lyricaod.
+
+    - Windows:     ``%LOCALAPPDATA%\\lyricaod``
+    - Linux/macOS: ``~/.cache/lyricaod``
+    """
+    if sys.platform == "win32":
+        base = Path(
+            os.environ.get(
+                "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")
+            )
+        )
+    else:
+        base = Path.home() / ".cache"
+    return base / "lyricaod"
+
+
+CACHE_DIR = _get_cache_dir()
 CACHE_FORMAT_VERSION = 2
 
 
@@ -71,6 +91,26 @@ class _FetchPrimaryThread(QThread):
             )
             if self._cancel:
                 return
+
+            # If the direct lookup failed (404), fall back to a title-only
+            # search so that artists with non-ASCII chars (e.g. Greek Lambda Λ)
+            # can still be resolved.
+            if result is None and self._artist:
+                print(
+                    f"[LRClib] direct lookup failed, trying title-only search"
+                    f" for \"{self._title}\""
+                )
+                fallbacks = search_all(
+                    "",
+                    self._title,
+                    self._album,
+                    self._duration_ms,
+                    max_results=1,
+                )
+                if self._cancel:
+                    return
+                result = fallbacks[0] if fallbacks else None
+
             if result:
                 print(f"[LRClib] found: \"{result.track_name}\" by \"{result.artist_name}\"")
             else:

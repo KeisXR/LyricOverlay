@@ -1,3 +1,14 @@
 PySide6>=6.6
-dbus-python>=1.3
 httpx>=0.25
+# Linux / macOS: D-Bus MPRIS listener
+dbus-python>=1.3; sys_platform == "linux"
+# Windows: WinRT System Media Transport Controls listener
+# winrt splits every WinRT namespace into its own PyPI package and does not
+# always declare transitive runtime imports as install_requires, so each
+# package we actually touch at runtime must be listed here explicitly.
+winrt-runtime>=2.0; sys_platform == "win32"
+winrt-Windows.Foundation>=2.0; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=2.0; sys_platform == "win32"
+winrt-Windows.Media>=2.0; sys_platform == "win32"
+winrt-Windows.Media.Control>=2.0; sys_platform == "win32"
+winrt-Windows.Storage.Streams>=2.0; sys_platform == "win32"
