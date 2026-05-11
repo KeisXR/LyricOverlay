@@ -165,9 +165,9 @@ class Application:
             browser = BrowserWsListener(
                 port=self.settings.get("behavior.ws_port", 56789)
             )
-            self.mpris = UnifiedPlayerListener(smtc, browser, self)
+            self.mpris = UnifiedPlayerListener(smtc, browser, None)
         else:
-            self.mpris = UnifiedPlayerListener(MprisListener(), None, self)
+            self.mpris = UnifiedPlayerListener(MprisListener(), None, None)
         pinned_player = self.settings.get("behavior.pinned_player")
         if pinned_player:
             self.mpris.pin_player(pinned_player)
