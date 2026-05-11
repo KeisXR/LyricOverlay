@@ -45,6 +45,8 @@ DEFAULT_SETTINGS = {
         "pinned_player": None,
         "remember_position": True,
         "always_on_top": True,
+        "smtc_position_fallback": True,
+        "ws_port": 56789,
     },
     "sources": {
         "lrclib": {"enabled": True},

@@ -249,8 +249,27 @@ class SettingsDialog(QDialog):
         zero_btn.clicked.connect(lambda: offset_slider.setValue(0))
         sync_form.addRow("", zero_btn)
 
+        smtc_group = QGroupBox("Windows SMTC")
+        smtc_form = QFormLayout(smtc_group)
+
+        smtc_fallback = self._check("behavior.smtc_position_fallback")
+        smtc_fallback.toggled.connect(
+            lambda checked: self._set("behavior.smtc_position_fallback", checked)
+        )
+        smtc_form.addRow("Position fallback (self-calculated)", smtc_fallback)
+
+        smtc_note = QLabel(
+            "Some players (especially web-based) do not update the "
+            "playback position via SMTC. Enable this to use internal "
+            "timer-based position tracking instead."
+        )
+        smtc_note.setWordWrap(True)
+        smtc_note.setStyleSheet("color: palette(mid);")
+        smtc_form.addRow("", smtc_note)
+
         layout.addWidget(player_group)
         layout.addWidget(sync_group)
+        layout.addWidget(smtc_group)
         layout.addStretch(1)
         return tab
 

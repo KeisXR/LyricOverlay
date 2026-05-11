@@ -2,6 +2,7 @@
 
 On Linux/macOS the listener uses D-Bus MPRIS (``player.mpris``).
 On Windows it uses the System Media Transport Controls API (``player.smtc``).
+The optional BrowserWsListener works on all platforms.
 """
 
 import sys
@@ -11,4 +12,6 @@ if sys.platform == "win32":
 else:
     from .mpris import MprisListener  # noqa: F401
 
-__all__ = ["MprisListener"]
+from .browser_ws import BrowserWsListener  # noqa: F401
+
+__all__ = ["MprisListener", "BrowserWsListener"]

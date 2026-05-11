@@ -13,15 +13,124 @@ import sys
 import signal
 import argparse
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication
 
-from player import MprisListener
+from player import MprisListener, BrowserWsListener
 from lyrics.manager import LyricsManager, LyricsResult
 from config.settings import Settings
 from ui.overlay import OverlayWindow
 from ui.tray import TrayIcon
 from meta_utils import normalise_yt_meta
+
+
+class UnifiedPlayerListener(QObject):
+    """Aggregates MprisListener and BrowserWsListener into a single
+    interface compatible with the rest of the application.
+
+    Signals from both backends are merged and filtered so that only the
+    currently-active player drives the UI.  Tray menus and the overlay
+    see a single unified player list.
+    """
+
+    metadata_changed = Signal(dict)
+    position_changed = Signal(int)
+    playback_state_changed = Signal(str, str)
+    players_changed = Signal(list)
+    active_player_changed = Signal(str)
+
+    def __init__(self, mpris, browser_ws=None, parent=None):
+        super().__init__(parent)
+        self._mpris = mpris
+        self._browser_ws = browser_ws
+        self._pinned_player = ""
+        self._active_player = ""
+
+        self._mpris.metadata_changed.connect(self._filter_metadata)
+        self._mpris.position_changed.connect(self._filter_position)
+        self._mpris.playback_state_changed.connect(self._filter_state)
+        self._mpris.players_changed.connect(self._update_players)
+        self._mpris.active_player_changed.connect(self._set_active)
+
+        if self._browser_ws:
+            self._browser_ws.metadata_changed.connect(self._filter_metadata)
+            self._browser_ws.position_changed.connect(self._filter_position)
+            self._browser_ws.playback_state_changed.connect(self._filter_state)
+            self._browser_ws.players_changed.connect(self._update_players)
+            self._browser_ws.active_player_changed.connect(self._set_active)
+
+        self._update_players()
+
+    # ------------------------------------------------------------------
+    #  Internal signal filtering
+    # ------------------------------------------------------------------
+
+    def _set_active(self, player_id: str):
+        self._active_player = player_id
+        self.active_player_changed.emit(player_id)
+
+    def _update_players(self):
+        players = self.get_players()
+        self.players_changed.emit(players)
+
+    def _filter_metadata(self, meta: dict):
+        pn = meta.get("player_name", "")
+        if self._active_player and pn != self._active_player:
+            return
+        self.metadata_changed.emit(meta)
+
+    def _filter_position(self, pos: int):
+        sender = self.sender()
+        if sender is self._mpris and self._active_player == "browser-ws":
+            return
+        if sender is self._browser_ws and self._active_player != "browser-ws":
+            return
+        self.position_changed.emit(pos)
+
+    def _filter_state(self, status: str, player_id: str):
+        if self._active_player and player_id != self._active_player:
+            return
+        self.playback_state_changed.emit(status, player_id)
+
+    # ------------------------------------------------------------------
+    #  Public API (compatible with MprisListener / SmtcListener)
+    # ------------------------------------------------------------------
+
+    def pin_player(self, player_id: str):
+        self._pinned_player = player_id
+        self._mpris.pin_player(player_id)
+        if self._browser_ws:
+            self._browser_ws.pin_player(player_id)
+
+    def unpin_player(self):
+        self._pinned_player = ""
+        self._mpris.unpin_player()
+        if self._browser_ws:
+            self._browser_ws.unpin_player()
+
+    def set_fallback(self, enabled: bool):
+        """Delegate to the underlying SMTC listener (Windows only)."""
+        if hasattr(self._mpris, "set_fallback"):
+            self._mpris.set_fallback(enabled)
+
+    def get_players(self) -> list[str]:
+        players = list(self._mpris.get_players())
+        if self._browser_ws:
+            players.extend(self._browser_ws.get_players())
+        return players
+
+    def get_active_player(self) -> str:
+        return self._active_player
+
+    def get_player_status(self, player_id: str) -> str:
+        if self._browser_ws and player_id == "browser-ws":
+            return self._browser_ws.get_player_status(player_id)
+        return self._mpris.get_player_status(player_id)
+
+    def get_current_metadata(self) -> dict | None:
+        if self._browser_ws and self._active_player == "browser-ws":
+            return self._browser_ws.get_current_metadata()
+        return self._mpris.get_current_metadata()
 
 
 class Application:
@@ -48,8 +157,17 @@ class Application:
         self.settings.changed.connect(self._on_settings_changed)
         self._current_meta: dict = {}
 
-        # MPRIS (constructor triggers initial player scan → signals fire)
-        self.mpris = MprisListener()
+        # MPRIS / Browser WebSocket listeners
+        if sys.platform == "win32":
+            smtc = MprisListener(
+                fallback=self.settings.get("behavior.smtc_position_fallback", True)
+            )
+            browser = BrowserWsListener(
+                port=self.settings.get("behavior.ws_port", 56789)
+            )
+            self.mpris = UnifiedPlayerListener(smtc, browser, self)
+        else:
+            self.mpris = UnifiedPlayerListener(MprisListener(), None, self)
         pinned_player = self.settings.get("behavior.pinned_player")
         if pinned_player:
             self.mpris.pin_player(pinned_player)
@@ -166,6 +284,10 @@ class Application:
             self.settings.get("cache.max_entries", 10000),
         )
         self.overlay.set_hide_delay(self.settings.get("behavior.hide_delay_ms", 2000))
+        if sys.platform == "win32":
+            self.mpris.set_fallback(
+                self.settings.get("behavior.smtc_position_fallback", True)
+            )
         # Only reposition if the user hasn't manually placed the window
         if not self.settings.get("behavior.remember_position", True):
             self._position_overlay()

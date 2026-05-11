@@ -13,32 +13,64 @@ import time
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
 
+# Cache the SessionManager instance to avoid re-creating it on every poll.
+_manager = None
+
+
 async def _query_smtc() -> dict | None:
     """Async query of current SMTC session state.
 
     Returns a plain dict with session info, or None if no session is active.
     """
+    global _manager
     from winrt.windows.media.control import (  # type: ignore[import]
         GlobalSystemMediaTransportControlsSessionManager as SessionManager,
         GlobalSystemMediaTransportControlsSessionPlaybackStatus as PlaybackStatus,
     )
 
-    manager = await SessionManager.request_async()
-    session = manager.get_current_session()
+    if _manager is None:
+        try:
+            _manager = await SessionManager.request_async()
+        except Exception as exc:
+            print(f"[SMTC] Failed to get SessionManager: {exc}", flush=True)
+            return None
+
+    try:
+        session = _manager.get_current_session()
+    except Exception as exc:
+        print(f"[SMTC] get_current_session failed: {exc}", flush=True)
+        _manager = None
+        return None
+
     if session is None:
         return None
 
     try:
         props = await session.try_get_media_properties_async()
-    except Exception:
-        return None
+    except Exception as exc:
+        print(f"[SMTC] try_get_media_properties_async failed: {exc}", flush=True)
+        props = None
 
-    playback_info = session.get_playback_info()
-    timeline = session.get_timeline_properties()
+    try:
+        playback_info = session.get_playback_info()
+    except Exception as exc:
+        print(f"[SMTC] get_playback_info failed: {exc}", flush=True)
+        playback_info = None
 
-    title = (getattr(props, "title", None) or "").strip()
-    artist = (getattr(props, "artist", None) or "").strip()
-    album = (getattr(props, "album_title", None) or "").strip()
+    try:
+        timeline = session.get_timeline_properties()
+    except Exception as exc:
+        print(f"[SMTC] get_timeline_properties failed: {exc}", flush=True)
+        timeline = None
+
+    if props is None:
+        title = ""
+        artist = ""
+        album = ""
+    else:
+        title = (getattr(props, "title", None) or "").strip()
+        artist = (getattr(props, "artist", None) or "").strip()
+        album = (getattr(props, "album_title", None) or "").strip()
     app_id = getattr(session, "source_app_user_model_id", "") or ""
 
     # Playback status
@@ -61,17 +93,17 @@ async def _query_smtc() -> dict | None:
     if timeline:
         try:
             pos_ms = round(timeline.position.total_seconds() * 1000)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[SMTC] timeline.position failed: {exc}", flush=True)
         try:
             length_ms = round(timeline.end_time.total_seconds() * 1000)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[SMTC] timeline.end_time failed: {exc}", flush=True)
 
     # All active sessions (for player list)
     sessions: list[str] = []
     try:
-        for s in manager.get_sessions():
+        for s in _manager.get_sessions():
             sid = getattr(s, "source_app_user_model_id", "") or ""
             if sid:
                 sessions.append(sid)
@@ -116,10 +148,10 @@ class _SmtcPollThread(QThread):
                 try:
                     state = loop.run_until_complete(_query_smtc())
                 except Exception as exc:
-                    print(f"[SMTC] Failed to query SMTC session state: {exc}")
+                    print(f"[SMTC] poll error: {exc}", flush=True)
                     state = None
                 self.state_ready.emit(state)
-                self.msleep(500)
+                self.msleep(250)
         finally:
             loop.close()
 
@@ -155,7 +187,7 @@ class SmtcListener(QObject):
     players_changed = Signal(list)
     active_player_changed = Signal(str)
 
-    def __init__(self, parent: QObject | None = None):
+    def __init__(self, parent: QObject | None = None, *, fallback: bool = True):
         super().__init__(parent)
 
         self._current_meta: dict = {}
@@ -163,11 +195,13 @@ class SmtcListener(QObject):
         self._active_player = ""
         self._pinned_player = ""
         self._players: list[str] = []
+        self._fallback = fallback
 
         # Position interpolation state
         self._position_ms = 0
         self._position_time = 0.0
         self._playback_rate = 1.0
+        self._last_reported_pos_ms: int | None = None
 
         # Background polling thread
         self._poll_thread = _SmtcPollThread(self)
@@ -184,6 +218,12 @@ class SmtcListener(QObject):
     # ------------------------------------------------------------------
 
     def _on_state(self, state: dict | None):
+        try:
+            self._on_state_impl(state)
+        except Exception as exc:
+            print(f"[SMTC] _on_state error: {exc}", flush=True)
+
+    def _on_state_impl(self, state: dict | None):
         if state is None:
             if self._active_player:
                 self._active_player = ""
@@ -223,28 +263,57 @@ class SmtcListener(QObject):
             "player_name": app_id,
         }
         prev = self._current_meta
-        if (
+        meta_changed = (
             new_meta.get("title") != prev.get("title")
             or new_meta.get("artist") != prev.get("artist")
             or new_meta.get("album") != prev.get("album")
-        ):
-            self._current_meta = new_meta
+        )
+        self._current_meta = new_meta
+        if meta_changed:
             print(
                 f"[SMTC] meta → artist=\"{artist}\" title=\"{title}\""
-                f"  ({app_id})"
+                f"  ({app_id})",
+                flush=True,
             )
             self.metadata_changed.emit(new_meta)
 
         # --- Playback status ---
-        if status != self._status:
+        old_status = self._status
+        status_changed = status != self._status
+        if status_changed:
+            print(f"[SMTC] status {old_status} → {status}", flush=True)
             self._status = status
             self.playback_state_changed.emit(status, app_id)
 
-        # --- Sync position clock ---
+        # --- Position handling ---
         if status == "Playing":
             self._playback_rate = rate
-            self._position_ms = pos_ms
-            self._position_time = time.monotonic()
+
+            last_pos = self._last_reported_pos_ms
+
+            if self._fallback:
+                # Fallback mode: SMTC の position を信頼しない
+                # 前回と大きく変わった時だけシークとして反映する (2秒以上の差)
+                # 再生中は内部タイマー (_tick_position) で自己計算して進める
+                seek_detected = (
+                    last_pos is not None
+                    and abs(pos_ms - last_pos) > 2000
+                )
+                became_playing = status_changed and old_status != "Playing"
+
+                if last_pos is None or seek_detected or became_playing:
+                    self._position_ms = pos_ms
+                    self._position_time = time.monotonic()
+                    self._last_reported_pos_ms = pos_ms
+                    print(f"[SMTC] pos anchor: {pos_ms}ms "
+                          f"(seek={seek_detected}, became_playing={became_playing})",
+                          flush=True)
+            else:
+                # Direct mode: SMTC の position をそのまま使う
+                # 前回と同じでも毎回更新する
+                self._position_ms = pos_ms
+                self._position_time = time.monotonic()
+                self._last_reported_pos_ms = pos_ms
 
     # ------------------------------------------------------------------
     #  Position interpolation
@@ -278,6 +347,10 @@ class SmtcListener(QObject):
 
     def unpin_player(self):
         self._pinned_player = ""
+
+    def set_fallback(self, enabled: bool):
+        """Toggle fallback mode at runtime."""
+        self._fallback = enabled
 
     # ------------------------------------------------------------------
     #  Public query methods (compatible with MprisListener)
