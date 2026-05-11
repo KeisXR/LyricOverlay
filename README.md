@@ -28,6 +28,38 @@ Desktop lyrics overlay for KDE Plasma. Displays synced lyrics as a transparent, 
 
 ## Installation
 
+### Downloadable builds
+
+The easiest way to run Lyricaod is to use a packaged build from GitHub Actions
+or Releases. These builds include Python and the Python dependencies, so users
+do not need to create a venv.
+
+- **Windows**: download `Lyricaod-windows`, extract it, then double-click `Lyricaod.exe`.
+- **Linux**: download `Lyricaod-linux`, extract it, then run `Lyricaod`.
+
+Linux still needs the normal desktop D-Bus/GObject runtime from the distro. On
+Ubuntu/Debian, install `python3-dbus python3-gi gir1.2-glib-2.0` if MPRIS player
+detection does not start.
+
+### Build packages locally
+
+To create the same clickable package yourself:
+
+```powershell
+# Windows PowerShell
+.\scripts\build_windows.ps1
+```
+
+```bash
+# Linux
+bash scripts/build_linux.sh
+```
+
+The output is written to `dist/Lyricaod/`.
+
+Do not run files from `build/`; that directory only contains temporary
+PyInstaller build files.
+
 ### Arch Linux / Manjaro
 
 ```bash

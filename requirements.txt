@@ -9,8 +9,11 @@ dbus-python>=1.3; sys_platform == "linux"
 winrt-runtime>=2.0; sys_platform == "win32"
 winrt-Windows.Foundation>=2.0; sys_platform == "win32"
 winrt-Windows.Foundation.Collections>=2.0; sys_platform == "win32"
+winrt-Windows.ApplicationModel>=2.0; sys_platform == "win32"
+winrt-Windows.Graphics>=2.0; sys_platform == "win32"
 winrt-Windows.Media>=2.0; sys_platform == "win32"
 winrt-Windows.Media.Control>=2.0; sys_platform == "win32"
 winrt-Windows.Storage.Streams>=2.0; sys_platform == "win32"
+winrt-Windows.System>=2.0; sys_platform == "win32"
 # Browser WebSocket adapter (Windows/Linux/macOS)
 websockets>=12.0
