@@ -1,11 +1,12 @@
 # Lyricaod
 
-Desktop lyrics overlay for KDE Plasma. Displays synced lyrics as a transparent, frameless window on top of all other windows, sourced from [LRClib](https://lrclib.net).
+Desktop lyrics overlay for Linux and Windows. Displays synced/unsynced lyrics as a transparent, frameless window on top of other windows, sourced from [LRClib](https://lrclib.net).
 
 ## Features
 
 - **Synced lyrics** — LRC format with line-by-line highlighting, powered by LRClib API
-- **MPRIS integration** — Auto-detects media players (Spotify, Firefox, KDE Connect, etc.) via D-Bus
+- **Player integration** — Linux: MPRIS (D-Bus), Windows: SMTC (WinRT)
+- **Browser extension bridge** — Optional local WebSocket bridge for browser MediaSession metadata
 - **Transparent overlay** — Frameless, always-on-top, no taskbar entry, doesn't steal focus
 - **Hover controls** — Close, resync, and alternative lyrics buttons fade in on mouse hover. Alternatives are fetched on-demand (one click) to keep the initial load fast.
 - **Dynamic sizing** — Window shrinks to fit displayed text (Wayland-friendly)
@@ -22,9 +23,9 @@ Desktop lyrics overlay for KDE Plasma. Displays synced lyrics as a transparent, 
 
 ## Requirements
 
-- **KDE Plasma 6** (Wayland or X11)
-- **Python 3.12+**
-- System packages: `pyside6`, `python-dbus`, `python-gobject`
+- **Python 3.10+** (3.12 recommended)
+- **Linux (Wayland/X11)** or **Windows**
+- Linux runtime packages for MPRIS: `python3-dbus`, `python3-gi`, `gir1.2-glib-2.0`
 
 ## Installation
 
@@ -67,8 +68,8 @@ PyInstaller build files.
 sudo pacman -S pyside6 python-dbus python-gobject python-httpx
 
 # Clone and run
-git clone https://github.com/<your-username>/lyricaod.git
-cd lyricaod
+git clone https://github.com/KeisXR/LyricOverlay.git
+cd LyricOverlay
 python src/main.py
 ```
 
@@ -76,8 +77,8 @@ python src/main.py
 
 ```bash
 # Clone
-git clone https://github.com/<your-username>/lyricaod.git
-cd lyricaod
+git clone https://github.com/KeisXR/LyricOverlay.git
+cd LyricOverlay
 
 # Run the setup script (creates venv, installs deps)
 bash setup.sh
@@ -144,9 +145,25 @@ setting on Wayland. The app sets a stable Wayland app id (`lyricaod`) and
 overlay window title (`Lyricaod Overlay`) so KWin can match only the lyrics
 overlay and force `Keep above`.
 
+### Browser extension (optional)
+
+The repository includes an unpacked Chromium extension in `extension/` that
+sends MediaSession metadata/playback state to Lyricaod over local WebSocket
+(`ws://127.0.0.1:56789` by default).
+
+1. Open `chrome://extensions` (or Edge equivalent)
+2. Enable **Developer mode**
+3. Click **Load unpacked** and select `extension/`
+4. Keep Lyricaod running (Windows starts the WebSocket listener)
+
 ## Configuration
 
-Settings are stored at `~/.config/lyricaod/settings.json`. Edit the file directly for changes to apply at runtime.
+Settings are stored at:
+
+- Linux/macOS: `~/.config/lyricaod/settings.json` (or `$XDG_CONFIG_HOME/lyricaod/settings.json`)
+- Windows: `%APPDATA%\\lyricaod\\settings.json`
+
+Edit the file directly for changes to apply at runtime.
 
 ```jsonc
 {
@@ -177,7 +194,9 @@ Settings are stored at `~/.config/lyricaod/settings.json`. Edit the file directl
     "hide_delay_ms": 2000,
     "pinned_player": null,
     "remember_position": true,
-    "always_on_top": true
+    "always_on_top": true,
+    "smtc_position_fallback": true,
+    "ws_port": 56789
   },
   "sources": {
     "lrclib": { "enabled": true },
@@ -202,7 +221,7 @@ Settings are stored at `~/.config/lyricaod/settings.json`. Edit the file directl
 | Component | Library |
 |-----------|---------|
 | UI | PySide6 |
-| D-Bus | dbus-python + GLib |
+| Player listeners | dbus-python + GLib (Linux), WinRT SMTC (Windows), websockets (browser bridge) |
 | HTTP | httpx |
 | Cache | sqlite3 (stdlib) |
 | Config | json (stdlib) + QFileSystemWatcher |
