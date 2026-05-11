@@ -78,11 +78,51 @@ def test_empty_right_of_slash_not_used():
     assert title == "Song / "
 
 
+def test_empty_left_of_slash_not_used():
+    artist, title = normalise_yt_meta("Original Artist", " / Artist")
+    assert artist == "Original Artist"
+    assert title == " / Artist"
+
+
+def test_video_word_right_of_slash_not_used_as_artist():
+    artist, title = normalise_yt_meta("Original Artist", "Song / Official Video")
+    assert artist == "Original Artist"
+    assert title == "Song / Official Video"
+
+
 def test_multiple_slash_separators():
     # Only the first " / " is used; everything after it becomes the artist.
     artist, title = normalise_yt_meta("Uploader", "Song / Real Artist / Extra")
     assert title == "Song"
     assert artist == "Real Artist / Extra"
+
+
+# ---------------------------------------------------------------------------
+# Browser/video title cleanup
+# ---------------------------------------------------------------------------
+
+def test_strips_site_suffixes_from_title():
+    artist, title = normalise_yt_meta("Artist", "Song | YouTube Music")
+    assert artist == "Artist"
+    assert title == "Song"
+
+
+def test_strips_official_video_noise():
+    artist, title = normalise_yt_meta("Artist", "Song (Official Music Video)")
+    assert artist == "Artist"
+    assert title == "Song"
+
+
+def test_strips_lyric_video_noise_in_brackets():
+    artist, title = normalise_yt_meta("Artist", "Song [Lyric Video]")
+    assert artist == "Artist"
+    assert title == "Song"
+
+
+def test_keeps_musical_version_label():
+    artist, title = normalise_yt_meta("Artist", "Song (acoustic ver.)")
+    assert artist == "Artist"
+    assert title == "Song (acoustic ver.)"
 
 
 # ---------------------------------------------------------------------------
@@ -115,8 +155,14 @@ if __name__ == "__main__":
         ("does_not_split_on_slash_without_spaces", test_does_not_split_on_slash_without_spaces),
         ("does_not_split_title_without_slash", test_does_not_split_title_without_slash),
         ("empty_right_of_slash_not_used", test_empty_right_of_slash_not_used),
+        ("empty_left_of_slash_not_used", test_empty_left_of_slash_not_used),
+        ("video_word_right_of_slash_not_used_as_artist", test_video_word_right_of_slash_not_used_as_artist),
         ("passthrough_when_no_patterns", test_passthrough_when_no_patterns),
         ("empty_strings", test_empty_strings),
+        ("strips_site_suffixes_from_title", test_strips_site_suffixes_from_title),
+        ("strips_official_video_noise", test_strips_official_video_noise),
+        ("strips_lyric_video_noise_in_brackets", test_strips_lyric_video_noise_in_brackets),
+        ("keeps_musical_version_label", test_keeps_musical_version_label),
     ]
     passed = 0
     for name, fn in tests:

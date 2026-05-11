@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Lyricaod Browser Adapter",
+  "name": "Lyricaod ブラウザ連携",
   "version": "1.0.0",
-  "description": "Sends media session data to Lyricaod via WebSocket",
+  "description": "ブラウザのメディア情報を WebSocket 経由で Lyricaod に送信します",
   "permissions": [],
   "host_permissions": [
     "<all_urls>"

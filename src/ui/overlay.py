@@ -366,7 +366,7 @@ class OverlayWindow(QWidget):
             load_font = QFont(font)
             load_font.setPixelSize(max(14, font.pixelSize() // 2))
             painter.setFont(load_font)
-            loader_text = "⏳ Loading…"
+            loader_text = "読み込み中..."
             lw = QFontMetrics(load_font).horizontalAdvance(loader_text)
             lx = (self.width() - lw) // 2
             ly = self.height() // 2 + QFontMetrics(load_font).ascent()
@@ -524,7 +524,7 @@ class OverlayWindow(QWidget):
 
         if self._alternatives:
             menu.addSeparator()
-            menu.addAction("✕ Close")
+            menu.addAction("✕ 閉じる")
 
         pos = self.mapToGlobal(
             QPoint(self._alt_menu_rect.x(), self._alt_menu_rect.bottom() + 4)

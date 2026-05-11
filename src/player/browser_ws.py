@@ -10,6 +10,7 @@ Requires: websockets
 
 import asyncio
 import json
+import math
 import time
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
@@ -32,7 +33,7 @@ class _WebSocketThread(QThread):
     def stop(self):
         self._running = False
         if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._loop.call_soon_threadsafe(lambda: None)
 
     async def _handler(self, websocket):
         self.connected.emit()
@@ -100,11 +101,13 @@ class BrowserWsListener(QObject):
     playback_state_changed = Signal(str, str)
     players_changed = Signal(list)
     active_player_changed = Signal(str)
+    connection_changed = Signal(bool)
 
     def __init__(self, parent: QObject | None = None, *, port: int = 56789):
         super().__init__(parent)
 
         self._current_meta: dict = {}
+        self._port = port
         self._status = "Stopped"
         self._active_player = ""
         self._pinned_player = ""
@@ -140,6 +143,7 @@ class BrowserWsListener(QObject):
             self.players_changed.emit(self._players)
             self._active_player = "browser-ws"
             self.active_player_changed.emit("browser-ws")
+            self.connection_changed.emit(True)
 
     def _on_disconnected(self):
         if self._connected:
@@ -148,6 +152,7 @@ class BrowserWsListener(QObject):
             self.players_changed.emit([])
             self._active_player = ""
             self.active_player_changed.emit("")
+            self.connection_changed.emit(False)
             self._status = "Stopped"
             self.playback_state_changed.emit("Stopped", "browser-ws")
 
@@ -166,9 +171,9 @@ class BrowserWsListener(QObject):
         artist = (data.get("artist") or "").strip()
         album = (data.get("album") or "").strip()
         status_raw = data.get("status", "Stopped")
-        pos_sec = data.get("position", 0)
-        dur_sec = data.get("duration", 0)
-        rate = float(data.get("rate", 1.0) or 1.0)
+        pos_sec = self._safe_float(data.get("position"), 0.0)
+        dur_sec = self._safe_float(data.get("duration"), 0.0)
+        rate = self._safe_float(data.get("rate"), 1.0)
 
         if status_raw in ("Playing", "Paused", "Stopped"):
             status = status_raw
@@ -213,30 +218,44 @@ class BrowserWsListener(QObject):
         if status == "Playing":
             self._playback_rate = rate
 
-            last_pos = self._last_reported_pos_ms
+            if self._position_time:
+                elapsed = (
+                    (time.monotonic() - self._position_time)
+                    * 1000.0
+                    * self._playback_rate
+                )
+                predicted_pos_ms = self._position_ms + round(elapsed)
+            else:
+                predicted_pos_ms = pos_ms
 
             # Browser sends high-precision position but network jitter can
             # cause micro-stutters if we snap every packet.  Anchor only on
-            # seek (>2 s change) or when playback just started.
-            seek_detected = (
-                last_pos is not None
-                and abs(pos_ms - last_pos) > 2000
-            )
+            # actual drift/seek or when playback just started.
+            seek_detected = abs(pos_ms - predicted_pos_ms) > 750
             became_playing = status_changed and old_status != "Playing"
 
-            if last_pos is None or seek_detected or became_playing:
+            if self._last_reported_pos_ms is None or seek_detected or became_playing:
                 self._position_ms = pos_ms
                 self._position_time = time.monotonic()
-                self._last_reported_pos_ms = pos_ms
                 print(
                     f"[BrowserWS] pos anchor: {pos_ms}ms "
                     f"(seek={seek_detected}, became_playing={became_playing})",
                     flush=True,
                 )
+            self._last_reported_pos_ms = pos_ms
         else:
             self._position_ms = pos_ms
             self._position_time = 0.0
             self._last_reported_pos_ms = pos_ms
+            self.position_changed.emit(pos_ms)
+
+    @staticmethod
+    def _safe_float(value, default: float) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        return number if math.isfinite(number) else default
 
     def _tick_position(self):
         if self._status != "Playing" or self._position_time == 0:
@@ -277,3 +296,14 @@ class BrowserWsListener(QObject):
 
     def get_current_metadata(self) -> dict | None:
         return self._current_meta if self._current_meta else None
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def get_port(self) -> int:
+        return self._port
+
+    def stop(self):
+        self._pos_timer.stop()
+        self._ws_thread.stop()
+        self._ws_thread.wait(2000)

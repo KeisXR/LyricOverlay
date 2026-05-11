@@ -4,9 +4,18 @@
   let lastState = {};
   let lastSend = 0;
 
+  function finiteNumber(value, fallback = 0) {
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  function currentMediaElement() {
+    const elements = Array.from(document.querySelectorAll('video, audio'));
+    return elements.find((el) => !el.paused && el.readyState > 0) || elements[0] || null;
+  }
+
   function readState() {
     const media = navigator.mediaSession;
-    const video = document.querySelector('video');
+    const player = currentMediaElement();
 
     const meta = media && media.metadata
       ? {
@@ -20,10 +29,10 @@
       title: meta.title,
       artist: meta.artist,
       album: meta.album,
-      status: video ? (video.paused ? 'Paused' : 'Playing') : 'Stopped',
-      position: video ? video.currentTime : 0,
-      duration: video && video.duration ? video.duration : 0,
-      rate: video && video.playbackRate ? video.playbackRate : 1.0,
+      status: player ? (player.paused ? 'Paused' : 'Playing') : 'Stopped',
+      position: player ? finiteNumber(player.currentTime) : 0,
+      duration: player ? finiteNumber(player.duration) : 0,
+      rate: player ? finiteNumber(player.playbackRate, 1.0) : 1.0,
     };
 
     return state;
@@ -43,8 +52,9 @@
   setInterval(() => {
     const state = readState();
     const hasMedia = state.title || state.status !== 'Stopped';
+    const wasTracking = lastState.title || lastState.status !== 'Stopped';
 
-    if (hasMedia && hasChanged(state)) {
+    if ((hasMedia || wasTracking) && hasChanged(state)) {
       lastState = state;
       chrome.runtime.sendMessage({ type: 'MEDIA_STATE', data: state }).catch(() => {});
       lastSend = Date.now();

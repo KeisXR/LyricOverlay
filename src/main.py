@@ -45,19 +45,25 @@ class UnifiedPlayerListener(QObject):
         self._browser_ws = browser_ws
         self._pinned_player = ""
         self._active_player = ""
+        self._mpris_active = ""
+        self._browser_active = ""
 
         self._mpris.metadata_changed.connect(self._filter_metadata)
         self._mpris.position_changed.connect(self._filter_position)
         self._mpris.playback_state_changed.connect(self._filter_state)
         self._mpris.players_changed.connect(self._update_players)
-        self._mpris.active_player_changed.connect(self._set_active)
+        self._mpris.active_player_changed.connect(
+            lambda player_id: self._set_backend_active("mpris", player_id)
+        )
 
         if self._browser_ws:
             self._browser_ws.metadata_changed.connect(self._filter_metadata)
             self._browser_ws.position_changed.connect(self._filter_position)
             self._browser_ws.playback_state_changed.connect(self._filter_state)
             self._browser_ws.players_changed.connect(self._update_players)
-            self._browser_ws.active_player_changed.connect(self._set_active)
+            self._browser_ws.active_player_changed.connect(
+                lambda player_id: self._set_backend_active("browser", player_id)
+            )
 
         self._update_players()
 
@@ -65,13 +71,31 @@ class UnifiedPlayerListener(QObject):
     #  Internal signal filtering
     # ------------------------------------------------------------------
 
-    def _set_active(self, player_id: str):
-        self._active_player = player_id
-        self.active_player_changed.emit(player_id)
+    def _set_backend_active(self, backend: str, player_id: str):
+        if backend == "browser":
+            self._browser_active = player_id
+        else:
+            self._mpris_active = player_id
+        self._choose_active_player()
 
     def _update_players(self):
         players = self.get_players()
         self.players_changed.emit(players)
+        self._choose_active_player()
+
+    def _choose_active_player(self):
+        players = self.get_players()
+        if self._pinned_player and self._pinned_player in players:
+            active = self._pinned_player
+        elif self._browser_active:
+            active = self._browser_active
+        elif self._mpris_active:
+            active = self._mpris_active
+        else:
+            active = ""
+        if active != self._active_player:
+            self._active_player = active
+            self.active_player_changed.emit(active)
 
     def _filter_metadata(self, meta: dict):
         pn = meta.get("player_name", "")
@@ -101,12 +125,14 @@ class UnifiedPlayerListener(QObject):
         self._mpris.pin_player(player_id)
         if self._browser_ws:
             self._browser_ws.pin_player(player_id)
+        self._choose_active_player()
 
     def unpin_player(self):
         self._pinned_player = ""
         self._mpris.unpin_player()
         if self._browser_ws:
             self._browser_ws.unpin_player()
+        self._choose_active_player()
 
     def set_fallback(self, enabled: bool):
         """Delegate to the underlying SMTC listener (Windows only)."""
@@ -131,6 +157,20 @@ class UnifiedPlayerListener(QObject):
         if self._browser_ws and self._active_player == "browser-ws":
             return self._browser_ws.get_current_metadata()
         return self._mpris.get_current_metadata()
+
+    def is_browser_connected(self) -> bool:
+        return bool(self._browser_ws and self._browser_ws.is_connected())
+
+    def get_browser_port(self) -> int | None:
+        if not self._browser_ws:
+            return None
+        return self._browser_ws.get_port()
+
+    def stop(self):
+        if hasattr(self._mpris, "stop"):
+            self._mpris.stop()
+        if self._browser_ws and hasattr(self._browser_ws, "stop"):
+            self._browser_ws.stop()
 
 
 class Application:
@@ -168,6 +208,7 @@ class Application:
             self.mpris = UnifiedPlayerListener(smtc, browser, None)
         else:
             self.mpris = UnifiedPlayerListener(MprisListener(), None, None)
+        self._qapp.aboutToQuit.connect(self.mpris.stop)
         pinned_player = self.settings.get("behavior.pinned_player")
         if pinned_player:
             self.mpris.pin_player(pinned_player)
@@ -230,7 +271,7 @@ class Application:
         if meta:
             self._on_metadata_changed(meta)
         else:
-            self.overlay.set_plain_text("Waiting for media…")
+            self.overlay.set_plain_text("メディアの再生待ち...")
 
     def _on_lyrics_ready(self, result: LyricsResult):
         lyrics = result.primary
@@ -240,16 +281,16 @@ class Application:
         elif lyrics.plain_text:
             self.overlay.set_plain_text(lyrics.plain_text)
         else:
-            self.overlay.set_plain_text("(instrumental)")
+            self.overlay.set_plain_text("(インストゥルメンタル)")
         self.overlay.set_alternatives(result.alternatives)
 
     def _on_lyrics_not_found(self, artist, title):
         self.overlay.set_loading(False)
         self.overlay.set_alternatives([])
         if title:
-            self.overlay.set_plain_text(f"No lyrics found for {title}")
+            self.overlay.set_plain_text(f"{title} の歌詞が見つかりません")
         else:
-            self.overlay.set_plain_text("Waiting for media…")
+            self.overlay.set_plain_text("メディアの再生待ち...")
 
     def _on_alternatives_requested(self):
         """User clicked the alternatives button — fetch alternatives on demand."""
@@ -369,7 +410,7 @@ def main():
     parser.add_argument(
         "--minimized",
         action="store_true",
-        help="Start with the overlay hidden (tray icon only).",
+        help="オーバーレイを非表示（トレイのみ）で起動します。",
     )
     args = parser.parse_args()
 

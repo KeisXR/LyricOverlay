@@ -367,3 +367,8 @@ class SmtcListener(QObject):
 
     def get_current_metadata(self) -> dict | None:
         return self._current_meta if self._current_meta else None
+
+    def stop(self):
+        self._pos_timer.stop()
+        self._poll_thread.stop()
+        self._poll_thread.wait(2000)

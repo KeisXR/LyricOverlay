@@ -49,25 +49,29 @@ class TrayIcon(QSystemTrayIcon):
     def _setup_menu(self):
         self._menu = QMenu()
 
-        self._show_action = QAction("Show Lyrics", self)
+        self._show_action = QAction("歌詞を表示", self)
         self._show_action.setCheckable(True)
         self._show_action.setChecked(True)
         self._show_action.triggered.connect(self._toggle_visibility)
         self._menu.addAction(self._show_action)
 
-        settings_action = QAction("Settings...", self)
+        settings_action = QAction("設定...", self)
         settings_action.triggered.connect(self._open_settings)
         self._menu.addAction(settings_action)
 
         self._menu.addSeparator()
 
-        self._player_menu = QMenu("Active Player")
+        self._player_menu = QMenu("有効なプレイヤー")
         self._menu.addMenu(self._player_menu)
+
+        self._browser_status_action = QAction("ブラウザ接続: 待機中", self)
+        self._browser_status_action.setEnabled(False)
+        self._menu.addAction(self._browser_status_action)
 
         self._menu.addSeparator()
 
         # --- Lines submenu ---
-        self._lines_menu = QMenu("Visible Lines")
+        self._lines_menu = QMenu("表示行数")
         for n in (3, 5, 7, 10):
             a = QAction(str(n), self)
             a.setCheckable(True)
@@ -76,9 +80,9 @@ class TrayIcon(QSystemTrayIcon):
         self._menu.addMenu(self._lines_menu)
 
         # --- Offset submenu ---
-        self._offset_menu = QMenu("Lyrics Offset")
-        for label, ms in [("−1000 ms", -1000), ("−500 ms", -500), ("None", 0),
-                          ("+500 ms", 500), ("+1000 ms", 1000)]:
+        self._offset_menu = QMenu("歌詞オフセット")
+        for label, ms in [("−1000 ms", -1000), ("−500 ms", -500), ("なし", 0),
+                           ("+500 ms", 500), ("+1000 ms", 1000)]:
             a = QAction(label, self)
             a.setCheckable(True)
             a.setData(ms)
@@ -87,46 +91,46 @@ class TrayIcon(QSystemTrayIcon):
         self._menu.addMenu(self._offset_menu)
 
         # --- Font ---
-        self._font_action = QAction("Choose Font…")
+        self._font_action = QAction("フォントを選択...")
         self._font_action.triggered.connect(self._choose_font)
         self._menu.addAction(self._font_action)
 
         # --- Background ---
-        self._bg_action = QAction("Text Background")
+        self._bg_action = QAction("文字背景")
         self._bg_action.setCheckable(True)
         self._bg_action.triggered.connect(self._toggle_background)
         self._menu.addAction(self._bg_action)
 
         # --- Always on Top ---
-        label = "Always on Top"
+        label = "常に手前に表示"
         if self._app.overlay.is_wayland():
-            label = "Always on Top (restart required)"
+            label = "常に手前に表示（再起動が必要）"
         self._ontop_action = QAction(label)
         self._ontop_action.setCheckable(True)
         self._ontop_action.triggered.connect(self._toggle_always_on_top)
         self._menu.addAction(self._ontop_action)
 
         # --- Remember Position ---
-        self._remember_pos_action = QAction("Remember Position")
+        self._remember_pos_action = QAction("位置を記憶")
         self._remember_pos_action.setCheckable(True)
         self._remember_pos_action.triggered.connect(self._toggle_remember_pos)
         self._menu.addAction(self._remember_pos_action)
 
         # --- Show Seekbar ---
-        self._seekbar_action = QAction("Show Seekbar")
+        self._seekbar_action = QAction("シークバーを表示")
         self._seekbar_action.setCheckable(True)
         self._seekbar_action.triggered.connect(self._toggle_seekbar)
         self._menu.addAction(self._seekbar_action)
 
         self._menu.addSeparator()
 
-        reload_action = QAction("Reload Lyrics", self)
+        reload_action = QAction("歌詞を再読み込み", self)
         reload_action.triggered.connect(self._reload_lyrics)
         self._menu.addAction(reload_action)
 
         self._menu.addSeparator()
 
-        quit_action = QAction("Quit", self)
+        quit_action = QAction("終了", self)
         quit_action.triggered.connect(QApplication.quit)
         self._menu.addAction(quit_action)
 
@@ -149,17 +153,20 @@ class TrayIcon(QSystemTrayIcon):
         self._player_menu.clear()
         active = self._app.mpris.get_active_player()
         for name in players:
-            action = QAction(name, self)
+            action = QAction(self._player_label(name), self)
+            action.setData(name)
             action.setCheckable(True)
             action.setChecked(name == active)
             action.triggered.connect(
                 lambda checked, n=name: self._select_player(n)
             )
             self._player_menu.addAction(action)
+        self._update_browser_status_action()
 
     def _update_player_menu_checks(self, active_name: str):
         for action in self._player_menu.actions():
-            action.setChecked(action.text() == active_name)
+            action.setChecked(action.data() == active_name)
+        self._update_browser_status_action()
 
     def _select_player(self, name: str):
         self._app.settings.set("behavior.pinned_player", name)
@@ -189,7 +196,7 @@ class TrayIcon(QSystemTrayIcon):
         ok, font = QFontDialog.getFont(
             cur_font,
             None,
-            "Lyricaod — Choose Font",
+            "Lyricaod — フォントを選択",
             QFontDialog.FontDialogOption.MonospacedFonts
             | QFontDialog.FontDialogOption.ProportionalFonts,
         )
@@ -264,3 +271,18 @@ class TrayIcon(QSystemTrayIcon):
         self._seekbar_action.setChecked(
             self._app.settings.get("window.show_seekbar", True)
         )
+        self._update_browser_status_action()
+
+    def _update_browser_status_action(self):
+        if self._app.mpris.is_browser_connected():
+            active = self._app.mpris.get_active_player()
+            suffix = "使用中" if active == "browser-ws" else "接続済み"
+            self._browser_status_action.setText(f"ブラウザ接続: {suffix}")
+        else:
+            self._browser_status_action.setText("ブラウザ接続: 待機中")
+
+    @staticmethod
+    def _player_label(player_id: str) -> str:
+        if player_id == "browser-ws":
+            return "ブラウザ拡張機能 (browser-ws)"
+        return player_id
