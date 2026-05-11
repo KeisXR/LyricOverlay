@@ -102,7 +102,7 @@ python src/main.py --minimized
 | Menu Item | Description |
 |-----------|-------------|
 | **Show Lyrics** | Toggle overlay visibility |
-| **Active Player** | Switch between detected MPRIS players |
+| **Active Player** | Switch between detected players |
 | **Visible Lines** | 3 / 5 / 7 / 10 lines |
 | **Lyrics Offset** | ±1000 ms sync adjustment |
 | **Choose Font…** | Font picker dialog |
