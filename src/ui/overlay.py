@@ -11,6 +11,7 @@ The window:
 """
 
 from PySide6.QtCore import (
+    QEasingCurve,
     Property as QtProperty,
     QPoint,
     QRect,
@@ -52,6 +53,8 @@ class OverlayWindow(QWidget):
         self._display_lines: list[str] = []
         self._synced = False
         self._current_line = -1
+        self._previous_line = -1
+        self._line_transition = 1.0
 
         # Loading state
         self._loading = False
@@ -131,6 +134,17 @@ class OverlayWindow(QWidget):
         float, _get_controls_opacity, _set_controls_opacity
     )
 
+    def _get_line_transition(self) -> float:
+        return self._line_transition
+
+    def _set_line_transition(self, value: float):
+        self._line_transition = value
+        self.update()
+
+    line_transition = QtProperty(
+        float, _get_line_transition, _set_line_transition
+    )
+
     def _animate_controls_opacity(self, target: float):
         # Keep as instance attr so Python doesn't GC the animation mid-flight
         self._opacity_anim = QPropertyAnimation(self, b"controls_opacity", parent=self)
@@ -138,6 +152,14 @@ class OverlayWindow(QWidget):
         self._opacity_anim.setStartValue(self._controls_opacity)
         self._opacity_anim.setEndValue(target)
         self._opacity_anim.start()
+
+    def _animate_line_transition(self):
+        self._line_anim = QPropertyAnimation(self, b"line_transition", parent=self)
+        self._line_anim.setDuration(260)
+        self._line_anim.setStartValue(0.0)
+        self._line_anim.setEndValue(1.0)
+        self._line_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._line_anim.start()
 
     # ------------------------------------------------------------------
     #  Mouse events
@@ -230,6 +252,8 @@ class OverlayWindow(QWidget):
         self._synced = synced
         self._display_lines = [ln.text for ln in lrc.lines] if lrc.lines else []
         self._current_line = -1
+        self._previous_line = -1
+        self._line_transition = 1.0
         self._shrink_to_content()
         self.update()
 
@@ -240,6 +264,8 @@ class OverlayWindow(QWidget):
             ln.strip() for ln in text.strip().split("\n") if ln.strip()
         ]
         self._current_line = -1
+        self._previous_line = -1
+        self._line_transition = 1.0
         self._shrink_to_content()
         self.update()
 
@@ -249,8 +275,13 @@ class OverlayWindow(QWidget):
         offset = self._settings.get("window.lyrics_offset_ms", 0)
         idx = find_current_line(self._parsed_lrc, position_ms + offset)
         if idx != self._current_line:
+            self._previous_line = self._current_line
             self._current_line = idx
-            self.update()
+            if idx >= 0:
+                self._animate_line_transition()
+            else:
+                self._line_transition = 1.0
+                self.update()
 
     def set_alternatives(self, alternatives: list):
         self._alternatives = alternatives
@@ -378,19 +409,26 @@ class OverlayWindow(QWidget):
             painter.end()
             return
 
-        # Scroll offset
         if self._synced and self._current_line >= 0:
-            start = max(0, self._current_line - visible // 2)
+            current_start = max(0, self._current_line - visible // 2)
+            if self._previous_line >= 0:
+                previous_start = max(0, self._previous_line - visible // 2)
+            else:
+                previous_start = current_start
+            start_float = previous_start + (current_start - previous_start) * self._line_transition
         else:
-            start = 0
-        end = min(start + visible, len(self._display_lines))
-        display_slice = self._display_lines[start:end]
+            current_start = 0
+            start_float = 0.0
 
-        total_h = line_h * len(display_slice)
+        first_line = max(0, int(start_float) - 1)
+        last_line = min(len(self._display_lines), int(start_float) + visible + 2)
+        total_h = line_h * visible
         y_offset = (self.height() - total_h) // 2
 
-        for i, text in enumerate(display_slice):
-            actual_idx = start + i
+        painter.save()
+        painter.setClipRect(QRect(0, y_offset, self.width(), total_h))
+        for actual_idx in range(first_line, last_line):
+            text = self._display_lines[actual_idx]
             is_current = self._synced and actual_idx == self._current_line
             color = highlight_color if is_current else text_color
 
@@ -400,7 +438,7 @@ class OverlayWindow(QWidget):
                 text = fm.elidedText(text, Qt.TextElideMode.ElideRight, available_w)
 
             x = max(10, (self.width() - fm.horizontalAdvance(text)) // 2)
-            y = y_offset + i * line_h + fm.ascent()
+            y = int(y_offset + (actual_idx - start_float) * line_h + fm.ascent())
 
             if self._settings.get("window.text_shadow", True):
                 painter.setPen(QPen(shadow_color))
@@ -408,6 +446,7 @@ class OverlayWindow(QWidget):
 
             painter.setPen(QPen(color))
             painter.drawText(x, y, text)
+        painter.restore()
 
         # --- Controls (hover opacity) ---
         painter.setOpacity(self._controls_opacity)
