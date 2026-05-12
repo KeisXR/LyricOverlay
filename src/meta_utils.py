@@ -33,6 +33,18 @@ _TITLE_NOISE_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ARTIST_TITLE_RE = re.compile(r"^(.{1,80}?)\s+[-–—]\s+(.{2,120})$")
+
+
+def _strip_repeated_artist_prefix(artist: str, title: str) -> str:
+    for sep in (" - ", " – ", " — "):
+        prefix = f"{artist}{sep}"
+        if title.casefold().startswith(prefix.casefold()):
+            stripped = title[len(prefix):].strip()
+            if stripped:
+                return stripped
+    return title
+
 
 def _sub_strip_if_changed(pattern: re.Pattern, value: str) -> str:
     cleaned = pattern.sub("", value)
@@ -55,6 +67,22 @@ def normalise_yt_meta(artist: str, title: str) -> tuple[str, str]:
     artist = _TOPIC_RE.sub("", artist).strip()
     title = _sub_strip_if_changed(_SITE_SUFFIX_RE, title)
     title = _sub_strip_if_changed(_VIDEO_NOISE_RE, title)
+
+    if artist:
+        title = _strip_repeated_artist_prefix(artist, title)
+    else:
+        match = _ARTIST_TITLE_RE.match(title)
+        if match:
+            artist_part = match.group(1).strip()
+            title_part = match.group(2).strip()
+            if (
+                artist_part
+                and title_part
+                and not _TITLE_NOISE_WORD_RE.search(artist_part)
+                and not _TITLE_NOISE_WORD_RE.search(title_part)
+            ):
+                artist = artist_part
+                title = title_part
 
     if " / " in title:
         # Split only on the first " / " so titles like

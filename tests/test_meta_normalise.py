@@ -125,6 +125,27 @@ def test_keeps_musical_version_label():
     assert title == "Song (acoustic ver.)"
 
 
+def test_splits_browser_artist_title_when_artist_empty():
+    artist, title = normalise_yt_meta("", "Official髭男dism - らしさ [Official Audio]")
+    assert artist == "Official髭男dism"
+    assert title == "らしさ"
+
+
+def test_strips_repeated_artist_prefix_when_artist_present():
+    artist, title = normalise_yt_meta(
+        "Official髭男dism",
+        "Official髭男dism - らしさ [Official Audio]",
+    )
+    assert artist == "Official髭男dism"
+    assert title == "らしさ"
+
+
+def test_does_not_split_dash_title_when_artist_present():
+    artist, title = normalise_yt_meta("Artist", "Song - Subtitle")
+    assert artist == "Artist"
+    assert title == "Song - Subtitle"
+
+
 # ---------------------------------------------------------------------------
 # No-op cases
 # ---------------------------------------------------------------------------
@@ -163,6 +184,9 @@ if __name__ == "__main__":
         ("strips_official_video_noise", test_strips_official_video_noise),
         ("strips_lyric_video_noise_in_brackets", test_strips_lyric_video_noise_in_brackets),
         ("keeps_musical_version_label", test_keeps_musical_version_label),
+        ("splits_browser_artist_title_when_artist_empty", test_splits_browser_artist_title_when_artist_empty),
+        ("strips_repeated_artist_prefix_when_artist_present", test_strips_repeated_artist_prefix_when_artist_present),
+        ("does_not_split_dash_title_when_artist_present", test_does_not_split_dash_title_when_artist_present),
     ]
     passed = 0
     for name, fn in tests:
