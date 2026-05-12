@@ -16,13 +16,10 @@ Desktop lyrics overlay for KDE Plasma. Displays synced lyrics as a transparent, 
 - **Hot-reload settings** — Edit `settings.json` and changes apply instantly
 - **System tray** — Full control via tray menu (font, lines, offset, player switching, settings)
 
-## Screenshot
-
-> A transparent overlay showing synced lyrics with the current line highlighted in yellow. Hovering reveals close (✕), resync (⟳), and alternatives (⇄) buttons.
-
 ## Requirements
 
 - **KDE Plasma 6** (Wayland or X11)
+- Windows (Experimental)
 - **Python 3.12+**
 - System packages: `pyside6`, `python-dbus`, `python-gobject`
 
