@@ -6,6 +6,7 @@ Desktop lyrics overlay for KDE Plasma. Displays synced lyrics as a transparent, 
 
 - **Synced lyrics** — LRC format with line-by-line highlighting, powered by LRClib API
 - **MPRIS integration** — Auto-detects media players (Spotify, Firefox, KDE Connect, etc.) via D-Bus
+- **Browser extension bridge** — Browser tab media metadata can be sent to Lyricaod over local WebSocket (Windows/Linux/macOS)
 - **Transparent overlay** — Frameless, always-on-top, no taskbar entry, doesn't steal focus
 - **Hover controls** — Close, resync, and alternative lyrics buttons fade in on mouse hover. Alternatives are fetched on-demand (one click) to keep the initial load fast.
 - **Dynamic sizing** — Window shrinks to fit displayed text (Wayland-friendly)
