@@ -12,6 +12,7 @@ import dbus
 from dbus.mainloop.glib import DBusGMainLoop
 from gi.repository import GLib
 from PySide6.QtCore import QObject, QTimer, Signal
+from meta_utils import enrich_missing_meta
 
 MPRIS_PREFIX = "org.mpris.MediaPlayer2."
 MPRIS_OBJECT_PATH = "/org/mpris/MediaPlayer2"
@@ -189,6 +190,7 @@ class MprisListener(QObject):
         if "Metadata" in changed:
             meta = self._parse_metadata(bus_name, changed["Metadata"])
             if meta:
+                meta = self._enrich_metadata(bus_name, meta)
                 player["metadata"] = meta
                 print(f"[MPRIS] meta: \"{meta.get('title','?')}\" by \"{meta.get('artist','?')}\"  ({meta.get('player_name','?')})")
                 if bus_name == self._active_player:
@@ -296,6 +298,19 @@ class MprisListener(QObject):
         except Exception:
             return None
 
+    def _enrich_metadata(self, bus_name: str, meta: dict) -> dict:
+        candidates = []
+        for other_bus, player in self._players.items():
+            if other_bus == bus_name:
+                continue
+            other = player.get("metadata")
+            if other:
+                candidates.append(other)
+        enriched = enrich_missing_meta(meta, candidates)
+        if enriched is not meta:
+            enriched["player_name"] = bus_name
+        return enriched
+
     # ------------------------------------------------------------------
     #  Position interpolation
     # ------------------------------------------------------------------
@@ -393,4 +408,12 @@ class MprisListener(QObject):
 
     def get_current_metadata(self) -> dict | None:
         p = self._players.get(self._active_player)
-        return p.get("metadata") if p else None
+        if not p:
+            return None
+        meta = p.get("metadata")
+        if not meta:
+            return None
+        enriched = self._enrich_metadata(self._active_player, meta)
+        if enriched is not meta:
+            p["metadata"] = enriched
+        return enriched
