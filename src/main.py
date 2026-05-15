@@ -4,7 +4,7 @@ Lyricaod — Desktop Lyrics Overlay.
 Displays synced / unsynced lyrics as a transparent overlay on top of
 all other windows, sourced from LRClib (and optionally Musixmatch).
 
-Supported platforms: Linux (MPRIS/D-Bus), Windows (SMTC/WinRT).
+Supported platforms: Linux (MPRIS/D-Bus + Browser WS), Windows (SMTC/WinRT + Browser WS).
 
 Entry point: ``python -m src.main`` or ``python src/main.py``
 """
@@ -199,15 +199,16 @@ class Application:
 
         # MPRIS / Browser WebSocket listeners
         if sys.platform == "win32":
-            smtc = MprisListener(
+            player_listener = MprisListener(
                 fallback=self.settings.get("behavior.smtc_position_fallback", True)
             )
-            browser = BrowserWsListener(
-                port=self.settings.get("behavior.ws_port", 56789)
-            )
-            self.mpris = UnifiedPlayerListener(smtc, browser, None)
         else:
-            self.mpris = UnifiedPlayerListener(MprisListener(), None, None)
+            player_listener = MprisListener()
+
+        browser = BrowserWsListener(
+            port=self.settings.get("behavior.ws_port", 56789)
+        )
+        self.mpris = UnifiedPlayerListener(player_listener, browser, None)
         self._qapp.aboutToQuit.connect(self.mpris.stop)
         pinned_player = self.settings.get("behavior.pinned_player")
         if pinned_player:
