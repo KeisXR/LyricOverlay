@@ -34,6 +34,7 @@ _TITLE_NOISE_WORD_RE = re.compile(
 )
 
 _ARTIST_TITLE_RE = re.compile(r"^(.{1,80}?)\s+[-–—]\s+(.{2,120})$")
+_TRACK_LENGTH_TOLERANCE_MS = 3000
 
 
 def _strip_repeated_artist_prefix(artist: str, title: str) -> str:
@@ -52,6 +53,78 @@ def _sub_strip_if_changed(pattern: re.Pattern, value: str) -> str:
 
 
 _PLACEHOLDER_TITLES = {"youtube music", "youtube", "spotify"}
+
+
+def _is_placeholder_trackid(value: str) -> bool:
+    return not value or value == "/"
+
+
+def _is_same_track_for_enrichment(base: dict, candidate: dict) -> bool:
+    base_trackid = str(base.get("trackid", ""))
+    cand_trackid = str(candidate.get("trackid", ""))
+    if (
+        not _is_placeholder_trackid(base_trackid)
+        and not _is_placeholder_trackid(cand_trackid)
+        and base_trackid == cand_trackid
+    ):
+        return True
+
+    base_title = str(base.get("title", "")).strip().casefold()
+    cand_title = str(candidate.get("title", "")).strip().casefold()
+    if not base_title or base_title != cand_title:
+        return False
+
+    base_len = int(base.get("length_ms", 0) or 0)
+    cand_len = int(candidate.get("length_ms", 0) or 0)
+    if (
+        base_len > 0
+        and cand_len > 0
+        and abs(base_len - cand_len) > _TRACK_LENGTH_TOLERANCE_MS
+    ):
+        return False
+
+    base_album = str(base.get("album", "")).strip().casefold()
+    cand_album = str(candidate.get("album", "")).strip().casefold()
+    if base_album and cand_album and base_album != cand_album:
+        return False
+    return True
+
+
+def enrich_missing_meta(base_meta: dict, candidate_metas: list[dict]) -> tuple[dict, bool]:
+    """Fill missing artist/album (artist is preferred over album/title) for the same track."""
+    artist = str(base_meta.get("artist", "")).strip()
+    album = str(base_meta.get("album", "")).strip()
+    title = str(base_meta.get("title", "")).strip()
+    if artist and album and title:
+        return base_meta, False
+
+    best = None
+    best_score = -1
+    for candidate in candidate_metas:
+        if not candidate or not _is_same_track_for_enrichment(base_meta, candidate):
+            continue
+        score = 0
+        if not artist and str(candidate.get("artist", "")).strip():
+            score += 2
+        if not album and str(candidate.get("album", "")).strip():
+            score += 1
+        if not title and str(candidate.get("title", "")).strip():
+            score += 1
+        if score > best_score:
+            best = candidate
+            best_score = score
+
+    if not best or best_score <= 0:
+        return base_meta, False
+
+    merged = dict(base_meta)
+    if not artist:
+        merged["artist"] = str(best.get("artist", "")).strip()
+    if not album:
+        merged["album"] = str(best.get("album", "")).strip()
+    if not title:
+        merged["title"] = str(best.get("title", "")).strip()
+    return merged, True
 
 
 def normalise_yt_meta(artist: str, title: str) -> tuple[str, str]:
