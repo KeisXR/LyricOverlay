@@ -204,7 +204,10 @@ class MprisListener(QObject):
 
             if status == "Playing":
                 if bus_name != self._active_player:
-                    self._set_active(bus_name)
+                    # Don't blindly switch on every Playing event.
+                    # Multiple MPRIS providers (e.g. browser + Plasma
+                    # integration) can report the same media and flap.
+                    self._select_active()
                 # Re-sync position when playback starts
                 # NOTE: update _position_ms FIRST, then reset the clock so
                 # interpolation starts from the exact sync point.
@@ -315,32 +318,44 @@ class MprisListener(QObject):
     # ------------------------------------------------------------------
 
     def _select_active(self):
-        """Priority rules: pinned > plasma-browser-integration > Playing > existing > first available."""
+        """Priority rules: pinned > current Playing > Playing > existing > first available."""
         # 1. Pinned player
         if self._pinned_player and self._pinned_player in self._players:
             self._set_active(self._pinned_player)
             return
 
-        # 2. Any Playing player, preferring kde plasma-browser-integration
-        #    (it provides cleaner metadata than raw browser MPRIS)
+        # 2. Keep current player when it is still playing to avoid rapid
+        #    oscillation between duplicate providers.
+        current = self._players.get(self._active_player)
+        if current and current.get("status") == "Playing":
+            return
+
+        # 3. Any Playing player.
+        #    Prefer non-plasma-browser-integration first for position
+        #    stability; keep plasma integration as fallback.
         preferred = None
+        plasma_fallback = None
         for name, p in self._players.items():
             if p.get("status") != "Playing":
                 continue
             if "plasma-browser-integration" in name:
-                self._set_active(name)
-                return
+                if plasma_fallback is None:
+                    plasma_fallback = name
+                continue
             if preferred is None:
                 preferred = name
         if preferred:
             self._set_active(preferred)
             return
+        if plasma_fallback:
+            self._set_active(plasma_fallback)
+            return
 
-        # 3. Keep current if metadata exists
+        # 4. Keep current if metadata exists
         if self._active_player and self._active_player in self._players:
             return
 
-        # 4. First available
+        # 5. First available
         if self._players:
             first = next(iter(self._players))
             self._set_active(first)
