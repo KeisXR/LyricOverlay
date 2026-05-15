@@ -156,6 +156,13 @@ def test_passthrough_when_no_patterns():
     assert title == "ぼくのフレンド"
 
 
+
+
+def test_drops_placeholder_site_title_when_artist_empty():
+    artist, title = normalise_yt_meta("", "YouTube Music")
+    assert artist == ""
+    assert title == ""
+
 def test_empty_strings():
     artist, title = normalise_yt_meta("", "")
     assert artist == ""

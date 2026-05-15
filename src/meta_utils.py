@@ -51,6 +51,9 @@ def _sub_strip_if_changed(pattern: re.Pattern, value: str) -> str:
     return cleaned.strip() if cleaned != value else value
 
 
+_PLACEHOLDER_TITLES = {"youtube music", "youtube", "spotify"}
+
+
 def normalise_yt_meta(artist: str, title: str) -> tuple[str, str]:
     """Remove YouTube Music noise from artist/title before a lyrics search.
 
@@ -83,6 +86,9 @@ def normalise_yt_meta(artist: str, title: str) -> tuple[str, str]:
             ):
                 artist = artist_part
                 title = title_part
+
+    if not artist and title.strip().casefold() in _PLACEHOLDER_TITLES:
+        return "", ""
 
     if " / " in title:
         # Split only on the first " / " so titles like
