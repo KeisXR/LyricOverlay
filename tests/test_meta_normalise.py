@@ -184,7 +184,8 @@ def test_enriches_missing_artist_and_album_from_same_title():
         "trackid": "/",
         "length_ms": 254500,
     }
-    merged = enrich_missing_meta(base, [candidate])
+    merged, changed = enrich_missing_meta(base, [candidate])
+    assert changed is True
     assert merged["artist"] == "Official髭男dism"
     assert merged["album"] == "Traveler"
     assert merged["title"] == "らしさ"
@@ -205,7 +206,8 @@ def test_does_not_enrich_when_title_differs():
         "trackid": "/",
         "length_ms": 254000,
     }
-    merged = enrich_missing_meta(base, [candidate])
+    merged, changed = enrich_missing_meta(base, [candidate])
+    assert changed is False
     assert merged["artist"] == ""
     assert merged["album"] == ""
 

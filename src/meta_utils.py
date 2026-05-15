@@ -85,13 +85,13 @@ def _is_same_track_for_enrichment(base: dict, candidate: dict) -> bool:
     return True
 
 
-def enrich_missing_meta(base_meta: dict, candidate_metas: list[dict]) -> dict:
-    """Fill missing artist/album (and title only when empty) for the same track."""
+def enrich_missing_meta(base_meta: dict, candidate_metas: list[dict]) -> tuple[dict, bool]:
+    """Fill missing artist/album (artist is preferred over album/title) for the same track."""
     artist = str(base_meta.get("artist", "")).strip()
     album = str(base_meta.get("album", "")).strip()
     title = str(base_meta.get("title", "")).strip()
     if artist and album and title:
-        return base_meta
+        return base_meta, False
 
     best = None
     best_score = -1
@@ -110,7 +110,7 @@ def enrich_missing_meta(base_meta: dict, candidate_metas: list[dict]) -> dict:
             best_score = score
 
     if not best or best_score <= 0:
-        return base_meta
+        return base_meta, False
 
     merged = dict(base_meta)
     if not artist:
@@ -119,7 +119,7 @@ def enrich_missing_meta(base_meta: dict, candidate_metas: list[dict]) -> dict:
         merged["album"] = str(best.get("album", "")).strip()
     if not title:
         merged["title"] = str(best.get("title", "")).strip()
-    return merged
+    return merged, True
 
 
 def normalise_yt_meta(artist: str, title: str) -> tuple[str, str]:
