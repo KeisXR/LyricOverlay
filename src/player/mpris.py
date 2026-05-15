@@ -307,7 +307,8 @@ class MprisListener(QObject):
             if other:
                 candidates.append(other)
         enriched, changed = enrich_missing_meta(meta, candidates)
-        if changed:
+        if changed or enriched.get("player_name") != bus_name:
+            enriched = dict(enriched)
             enriched["player_name"] = bus_name
         return enriched
 
@@ -413,4 +414,6 @@ class MprisListener(QObject):
         meta = p.get("metadata")
         if not meta:
             return None
+        if meta.get("artist") and meta.get("album") and meta.get("title"):
+            return meta
         return self._enrich_metadata(self._active_player, meta)

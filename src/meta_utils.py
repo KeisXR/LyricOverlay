@@ -34,6 +34,7 @@ _TITLE_NOISE_WORD_RE = re.compile(
 )
 
 _ARTIST_TITLE_RE = re.compile(r"^(.{1,80}?)\s+[-–—]\s+(.{2,120})$")
+_TRACK_LENGTH_TOLERANCE_MS = 3000
 
 
 def _strip_repeated_artist_prefix(artist: str, title: str) -> str:
@@ -75,7 +76,11 @@ def _is_same_track_for_enrichment(base: dict, candidate: dict) -> bool:
 
     base_len = int(base.get("length_ms", 0) or 0)
     cand_len = int(candidate.get("length_ms", 0) or 0)
-    if base_len > 0 and cand_len > 0 and abs(base_len - cand_len) > 3000:
+    if (
+        base_len > 0
+        and cand_len > 0
+        and abs(base_len - cand_len) > _TRACK_LENGTH_TOLERANCE_MS
+    ):
         return False
 
     base_album = str(base.get("album", "")).strip().casefold()
