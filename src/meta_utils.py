@@ -86,7 +86,7 @@ def _is_same_track_for_enrichment(base: dict, candidate: dict) -> bool:
 
 
 def enrich_missing_meta(base_meta: dict, candidate_metas: list[dict]) -> dict:
-    """Fill missing artist/album/title from metadata of the same track."""
+    """Fill missing artist/album (and title only when empty) for the same track."""
     artist = str(base_meta.get("artist", "")).strip()
     album = str(base_meta.get("album", "")).strip()
     title = str(base_meta.get("title", "")).strip()

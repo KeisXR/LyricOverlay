@@ -307,7 +307,7 @@ class MprisListener(QObject):
             if other:
                 candidates.append(other)
         enriched = enrich_missing_meta(meta, candidates)
-        if enriched is not meta:
+        if enriched != meta:
             enriched["player_name"] = bus_name
         return enriched
 
@@ -414,6 +414,6 @@ class MprisListener(QObject):
         if not meta:
             return None
         enriched = self._enrich_metadata(self._active_player, meta)
-        if enriched is not meta:
+        if enriched != meta:
             p["metadata"] = enriched
         return enriched
