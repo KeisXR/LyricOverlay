@@ -189,6 +189,8 @@ class Application:
             ttl_days=self.settings.get("cache.ttl_days", 30),
             max_entries=self.settings.get("cache.max_entries", 10000),
             lrclib_enabled=self.settings.get("sources.lrclib.enabled", True),
+            syncedlyrics_enabled=self.settings.get("sources.syncedlyrics.enabled", True),
+            syncedlyrics_enhanced=self.settings.get("sources.syncedlyrics.enhanced", True),
         )
 
         self.lyrics.lyrics_ready.connect(self._on_lyrics_ready)
@@ -320,6 +322,12 @@ class Application:
     def _on_settings_changed(self):
         self.lyrics.set_lrclib_enabled(
             self.settings.get("sources.lrclib.enabled", True)
+        )
+        self.lyrics.set_syncedlyrics_enabled(
+            self.settings.get("sources.syncedlyrics.enabled", True)
+        )
+        self.lyrics.set_syncedlyrics_enhanced(
+            self.settings.get("sources.syncedlyrics.enhanced", True)
         )
         self.lyrics.set_cache_limits(
             self.settings.get("cache.ttl_days", 30),

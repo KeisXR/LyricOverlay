@@ -17,3 +17,4 @@ winrt-Windows.Storage.Streams>=2.0; sys_platform == "win32"
 winrt-Windows.System>=2.0; sys_platform == "win32"
 # Browser WebSocket adapter (Windows/Linux/macOS)
 websockets>=12.0
+syncedlyrics>=1.0.1

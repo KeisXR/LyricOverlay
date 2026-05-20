@@ -37,6 +37,7 @@ DEFAULT_SETTINGS = {
         "user_y": None,
         "text_shadow": True,
         "show_seekbar": True,
+        "karaoke_enabled": True,
     },
     "behavior": {
         "start_minimized": False,
@@ -51,6 +52,7 @@ DEFAULT_SETTINGS = {
     "sources": {
         "lrclib": {"enabled": True},
         "musixmatch": {"enabled": False, "api_key": ""},
+        "syncedlyrics": {"enabled": True, "enhanced": True},
     },
     "cache": {
         "ttl_days": 30,
