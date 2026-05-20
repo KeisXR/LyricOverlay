@@ -67,22 +67,36 @@ def parse_lrc(lrc_text: str) -> ParsedLRC:
         if not stamps:
             continue
 
-        text = re.sub(r"\[.*?\]", "", raw).strip()
+        text = _TIMESTAMP_RE.sub("", raw).strip()
 
         # Word-level enhanced timing
-        word_matches = _WORDTIME_RE.findall(raw)
+        word_content = _TIMESTAMP_RE.sub("", raw).strip()
+        word_matches = list(_WORDTIME_RE.finditer(word_content))
         parsed_words: list[LyricWord] | None = None
         if word_matches:
-            word_text = re.sub(r"\[.*?\]|<.*?>", "", raw).strip()
-            parts = word_text.split()
             parsed_words = []
-            for i, wm in enumerate(word_matches):
-                mins, secs = wm
+            text_parts: list[str] = []
+            for i, match in enumerate(word_matches):
+                mins, secs = match.group(1), match.group(2)
                 ts = int(mins) * 60000 + round(float(secs) * 1000)
-                if i < len(parts):
-                    parsed_words.append(LyricWord(timestamp_ms=ts, text=parts[i]))
-            # Override text to remove both bracket and angle-bracket tags
-            text = word_text
+                next_start = (
+                    word_matches[i + 1].start()
+                    if i + 1 < len(word_matches)
+                    else len(word_content)
+                )
+                segment = word_content[match.end():next_start]
+                if not segment:
+                    continue
+                parsed_words.append(
+                    LyricWord(timestamp_ms=ts + result.offset_ms, text=segment)
+                )
+                text_parts.append(segment)
+            if parsed_words:
+                # Preserve inter-word spacing for drawing widths, but do not expose
+                # leading/trailing padding as part of the display line.
+                text = "".join(text_parts).strip()
+            else:
+                parsed_words = None
 
         for mins, secs in stamps:
             ts_ms = int(mins) * 60000 + round(float(secs) * 1000)

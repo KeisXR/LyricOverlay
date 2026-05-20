@@ -29,7 +29,7 @@ if python3 -c "import PySide6" 2>/dev/null; then
     echo "==> PySide6 found (system-wide). Creating venv with --system-site-packages..."
     python3 -m venv --system-site-packages "${VENV_DIR}"
     echo "==> Installing remaining pip deps..."
-    "${VENV_DIR}/bin/pip" install httpx dbus-python
+    "${VENV_DIR}/bin/pip" install -r "${SCRIPT_DIR}/requirements.txt"
 elif [ -f "${VENV_DIR}/bin/python" ]; then
     echo "==> Using existing venv..."
     echo "==> Installing deps..."

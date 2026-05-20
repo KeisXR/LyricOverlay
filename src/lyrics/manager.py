@@ -71,6 +71,7 @@ class _FetchPrimaryThread(QThread):
         title: str,
         album: str,
         duration_ms: int,
+        use_lrclib: bool,
         use_syncedlyrics: bool,
         syncedlyrics_enhanced: bool,
         parent: QObject | None = None,
@@ -80,6 +81,7 @@ class _FetchPrimaryThread(QThread):
         self._title = title
         self._album = album
         self._duration_ms = duration_ms
+        self._use_lrclib = use_lrclib
         self._use_syncedlyrics = use_syncedlyrics
         self._syncedlyrics_enhanced = syncedlyrics_enhanced
         self._cancel = False
@@ -92,17 +94,26 @@ class _FetchPrimaryThread(QThread):
             return
         try:
             if self._use_syncedlyrics:
-                synced = get_syncedlyrics(
-                    self._artist,
-                    self._title,
-                    enhanced=self._syncedlyrics_enhanced,
-                )
+                try:
+                    synced = get_syncedlyrics(
+                        self._artist,
+                        self._title,
+                        enhanced=self._syncedlyrics_enhanced,
+                    )
+                except Exception as exc:
+                    print(f"[syncedlyrics] failed, falling back to LRClib: {exc}")
+                    synced = None
                 if self._cancel:
                     return
                 if synced:
                     print(f"[syncedlyrics] found: \"{self._title}\" by \"{self._artist}\"")
                     self.finished_ok.emit(("syncedlyrics", synced))
                     return
+
+            if not self._use_lrclib:
+                print(f"[Lyrics] LRClib disabled; no results for \"{self._title}\"")
+                self.finished_ok.emit(None)
+                return
 
             result = get_lrclib(
                 self._artist, self._title, self._album, self._duration_ms
@@ -149,8 +160,6 @@ class _FetchAltThread(QThread):
         title: str,
         album: str,
         duration_ms: int,
-        use_syncedlyrics: bool,
-        syncedlyrics_enhanced: bool,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
@@ -158,8 +167,6 @@ class _FetchAltThread(QThread):
         self._title = title
         self._album = album
         self._duration_ms = duration_ms
-        self._use_syncedlyrics = use_syncedlyrics
-        self._syncedlyrics_enhanced = syncedlyrics_enhanced
         self._cancel = False
 
     def cancel(self):
@@ -334,6 +341,13 @@ class LyricsManager(QObject):
             self._conn.commit()
 
     @staticmethod
+    def _format_lrc_timestamp(timestamp_ms: int) -> str:
+        timestamp_ms = max(0, timestamp_ms)
+        mins = timestamp_ms // 60000
+        secs = (timestamp_ms % 60000) / 1000
+        return f"{mins:02d}:{secs:05.2f}"
+
+    @staticmethod
     def _lrc_to_raw(lrc: ParsedLRC) -> str:
         parts: list[str] = []
         if lrc.title:
@@ -344,9 +358,16 @@ class LyricsManager(QObject):
             parts.append(f"[offset:{lrc.offset_ms}]")
         for line in lrc.lines:
             timestamp_ms = line.timestamp_ms - lrc.offset_ms
-            mins = timestamp_ms // 60000
-            secs = (timestamp_ms % 60000) / 1000
-            parts.append(f"[{mins:02d}:{secs:05.2f}]{line.text}")
+            line_tag = f"[{LyricsManager._format_lrc_timestamp(timestamp_ms)}]"
+            if line.words:
+                word_parts = []
+                for word in line.words:
+                    word_ms = word.timestamp_ms - lrc.offset_ms
+                    word_tag = f"<{LyricsManager._format_lrc_timestamp(word_ms)}>"
+                    word_parts.append(f"{word_tag}{word.text}")
+                parts.append(f"{line_tag}{''.join(word_parts).rstrip()}")
+            else:
+                parts.append(f"{line_tag}{line.text}")
         return "\n".join(parts)
 
     @staticmethod
@@ -439,6 +460,7 @@ class LyricsManager(QObject):
             title,
             album,
             duration_ms,
+            self._lrclib_enabled,
             self._syncedlyrics_enabled,
             self._syncedlyrics_enhanced,
             self,
@@ -450,7 +472,7 @@ class LyricsManager(QObject):
         )
         self._worker.finished_error.connect(
             lambda msg, a=artist, t=title, rid=req_id:
-                self._on_fetch_error(a, t, rid),
+                self._on_fetch_error(a, t, rid, msg),
             type=Qt.ConnectionType.QueuedConnection,
         )
         self._worker.start()
@@ -471,6 +493,11 @@ class LyricsManager(QObject):
         req_id = self._req_id
         key = self._last_search_key
 
+        if not self._lrclib_enabled:
+            print("[LRClib] alternatives skipped: source disabled")
+            self.alternatives_ready.emit([])
+            return
+
         # Cancel any running worker (primary or alt)
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
@@ -483,7 +510,7 @@ class LyricsManager(QObject):
             type=Qt.ConnectionType.QueuedConnection,
         )
         self._worker.finished_error.connect(
-            lambda msg, rid=req_id: self._on_fetch_error("", "", rid),
+            lambda msg, rid=req_id: self._on_fetch_error("", "", rid, msg),
             type=Qt.ConnectionType.QueuedConnection,
         )
         self._worker.start()
@@ -524,9 +551,11 @@ class LyricsManager(QObject):
         print(f"[Lyrics] alternatives: {len(alts)} result(s)")
         self.alternatives_ready.emit(alts)
 
-    def _on_fetch_error(self, artist, title, req_id):
+    def _on_fetch_error(self, artist, title, req_id, message: str = ""):
         if req_id != self._req_id:
             return
+        if message:
+            print(f"[Lyrics] fetch error: {message}")
         self._cached_alternatives = []
         self.lyrics_not_found.emit(artist, title)
 

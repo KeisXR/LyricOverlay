@@ -47,7 +47,10 @@ def get_syncedlyrics(
             plain_lyrics=None,
         )
 
-    plain = syncedlyrics.search(query, synced_only=False, **opts)
+    plain_opts: dict = {}
+    if providers:
+        plain_opts["providers"] = list(providers)
+    plain = syncedlyrics.search(query, plain_only=True, **plain_opts)
     if plain:
         return SyncedLyricsResult(
             artist_name=artist,

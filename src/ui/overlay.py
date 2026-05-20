@@ -320,6 +320,8 @@ class OverlayWindow(QWidget):
         cur_ts = words[idx].timestamp_ms
         if idx + 1 < len(words):
             nxt = words[idx + 1].timestamp_ms
+        elif self._current_line + 1 < len(self._parsed_lrc.lines):
+            nxt = self._parsed_lrc.lines[self._current_line + 1].timestamp_ms
         else:
             nxt = max(cur_ts + 1, line.timestamp_ms + 1000)
         span = max(1, nxt - cur_ts)
@@ -329,12 +331,25 @@ class OverlayWindow(QWidget):
         full_w = fm.horizontalAdvance(text)
         progress_w = 0
         if self._current_word_index >= 0:
-            parts = text.split()
-            safe_idx = min(self._current_word_index, len(parts) - 1) if parts else -1
+            segments = [word.text for word in words if word.text]
+            joined = "".join(segments)
+            if joined.strip() == text and segments:
+                segments[0] = segments[0].lstrip()
+                segments[-1] = segments[-1].rstrip()
+            elif "".join(segment.strip() for segment in segments) == text:
+                segments = [segment.strip() for segment in segments]
+            else:
+                parts = text.split()
+                if len(parts) == len(segments):
+                    segments = [
+                        part + (" " if i + 1 < len(parts) else "")
+                        for i, part in enumerate(parts)
+                    ]
+            safe_idx = min(self._current_word_index, len(segments) - 1) if segments else -1
             if safe_idx >= 0:
-                before = " ".join(parts[:safe_idx])
-                cur = parts[safe_idx]
-                before_w = fm.horizontalAdvance(before + (" " if before else ""))
+                before = "".join(segments[:safe_idx])
+                cur = segments[safe_idx]
+                before_w = fm.horizontalAdvance(before)
                 cur_w = fm.horizontalAdvance(cur)
                 progress_w = int(before_w + cur_w * self._current_word_progress)
         progress_w = max(0, min(full_w, progress_w))

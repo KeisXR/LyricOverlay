@@ -95,10 +95,30 @@ def test_enhanced_word_timing():
     assert lrc.lines[0].text == "I just wanna be part of your symphony"
     assert lrc.lines[0].words is not None
     assert len(lrc.lines[0].words) == 8
-    assert lrc.lines[0].words[0].text == "I"
+    assert lrc.lines[0].words[0].text == "I "
     assert lrc.lines[0].words[0].timestamp_ms == 18320
     assert lrc.lines[0].words[-1].text == "symphony"
     assert lrc.lines[0].words[-1].timestamp_ms == 20740
+
+
+def test_enhanced_word_timing_without_spaces():
+    """Enhanced LRC can represent Japanese per-character timing."""
+    synced = "[00:01.00]<00:01.00>全<00:01.20>力<00:01.40>少年"
+    lrc = parse_lrc(synced)
+
+    assert lrc.lines[0].text == "全力少年"
+    assert lrc.lines[0].words is not None
+    assert [w.text for w in lrc.lines[0].words] == ["全", "力", "少年"]
+    assert [w.timestamp_ms for w in lrc.lines[0].words] == [1000, 1200, 1400]
+
+
+def test_enhanced_word_timing_applies_offset():
+    synced = "[offset:500]\n[00:01.00]<00:01.00>A <00:01.25>B"
+    lrc = parse_lrc(synced)
+
+    assert lrc.lines[0].timestamp_ms == 1500
+    assert lrc.lines[0].words is not None
+    assert [w.timestamp_ms for w in lrc.lines[0].words] == [1500, 1750]
 
 
 if __name__ == "__main__":
@@ -114,6 +134,8 @@ if __name__ == "__main__":
         ("sorting", test_sorting),
         ("float_seconds", test_float_seconds),
         ("enhanced_word_timing", test_enhanced_word_timing),
+        ("enhanced_word_timing_without_spaces", test_enhanced_word_timing_without_spaces),
+        ("enhanced_word_timing_applies_offset", test_enhanced_word_timing_applies_offset),
     ]
     passed = 0
     for name, fn in tests:
