@@ -361,6 +361,18 @@ class SettingsDialog(QDialog):
         )
         form.addRow("LRClib", lrclib)
 
+        syncedlyrics = self._check("sources.syncedlyrics.enabled")
+        syncedlyrics.toggled.connect(
+            lambda checked: self._set("sources.syncedlyrics.enabled", checked)
+        )
+        form.addRow("Syncedlyrics", syncedlyrics)
+
+        enhanced = self._check("sources.syncedlyrics.enhanced")
+        enhanced.toggled.connect(
+            lambda checked: self._set("sources.syncedlyrics.enhanced", checked)
+        )
+        form.addRow("Word-by-word (Enhanced)", enhanced)
+
         musixmatch = self._check("sources.musixmatch.enabled")
         musixmatch.setEnabled(False)
         musixmatch.toggled.connect(
@@ -466,6 +478,10 @@ class SettingsDialog(QDialog):
             self._app.overlay.set_hide_delay(int(value))
         if key == "sources.lrclib.enabled":
             self._app.lyrics.set_lrclib_enabled(bool(value))
+        if key == "sources.syncedlyrics.enabled":
+            self._app.lyrics.set_syncedlyrics_enabled(bool(value))
+        if key == "sources.syncedlyrics.enhanced":
+            self._app.lyrics.set_syncedlyrics_enhanced(bool(value))
         if key in ("cache.ttl_days", "cache.max_entries"):
             self._app.lyrics.set_cache_limits(
                 self._settings.get("cache.ttl_days", 30),

@@ -17,6 +17,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Qt, Signal
 
 from .lrclib import get_lrclib, search_all, LrcLibResult
+from .syncedlyrics_client import get_syncedlyrics, SyncedLyricsResult
 from .lrc_parser import ParsedLRC, parse_lrc
 
 
@@ -59,9 +60,9 @@ class LyricsResult:
 
 
 class _FetchPrimaryThread(QThread):
-    """Fetches a single best-match lyrics result from LRClib."""
+    """Fetches a single best-match lyrics result from enabled providers."""
 
-    finished_ok = Signal(object)  # LrcLibResult | None
+    finished_ok = Signal(object)  # tuple[str, object] | None
     finished_error = Signal(str)
 
     def __init__(
@@ -70,6 +71,8 @@ class _FetchPrimaryThread(QThread):
         title: str,
         album: str,
         duration_ms: int,
+        use_syncedlyrics: bool,
+        syncedlyrics_enhanced: bool,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
@@ -77,6 +80,8 @@ class _FetchPrimaryThread(QThread):
         self._title = title
         self._album = album
         self._duration_ms = duration_ms
+        self._use_syncedlyrics = use_syncedlyrics
+        self._syncedlyrics_enhanced = syncedlyrics_enhanced
         self._cancel = False
 
     def cancel(self):
@@ -86,15 +91,25 @@ class _FetchPrimaryThread(QThread):
         if self._cancel:
             return
         try:
+            if self._use_syncedlyrics:
+                synced = get_syncedlyrics(
+                    self._artist,
+                    self._title,
+                    enhanced=self._syncedlyrics_enhanced,
+                )
+                if self._cancel:
+                    return
+                if synced:
+                    print(f"[syncedlyrics] found: \"{self._title}\" by \"{self._artist}\"")
+                    self.finished_ok.emit(("syncedlyrics", synced))
+                    return
+
             result = get_lrclib(
                 self._artist, self._title, self._album, self._duration_ms
             )
             if self._cancel:
                 return
 
-            # If the direct lookup failed (404), fall back to a title-only
-            # search so that artists with non-ASCII chars (e.g. Greek Lambda Λ)
-            # can still be resolved.
             if result is None and self._artist:
                 print(
                     f"[LRClib] direct lookup failed, trying title-only search"
@@ -113,9 +128,10 @@ class _FetchPrimaryThread(QThread):
 
             if result:
                 print(f"[LRClib] found: \"{result.track_name}\" by \"{result.artist_name}\"")
+                self.finished_ok.emit(("lrclib", result))
             else:
                 print(f"[LRClib] no results for \"{self._title}\" by \"{self._artist}\"")
-            self.finished_ok.emit(result)
+                self.finished_ok.emit(None)
         except Exception as exc:
             if not self._cancel:
                 self.finished_error.emit(str(exc))
@@ -133,6 +149,8 @@ class _FetchAltThread(QThread):
         title: str,
         album: str,
         duration_ms: int,
+        use_syncedlyrics: bool,
+        syncedlyrics_enhanced: bool,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
@@ -140,6 +158,8 @@ class _FetchAltThread(QThread):
         self._title = title
         self._album = album
         self._duration_ms = duration_ms
+        self._use_syncedlyrics = use_syncedlyrics
+        self._syncedlyrics_enhanced = syncedlyrics_enhanced
         self._cancel = False
 
     def cancel(self):
@@ -174,12 +194,16 @@ class LyricsManager(QObject):
         ttl_days: int = 30,
         max_entries: int = 10000,
         lrclib_enabled: bool = True,
+        syncedlyrics_enabled: bool = True,
+        syncedlyrics_enhanced: bool = True,
         parent: QObject | None = None,
     ):
         super().__init__(parent)
         self._ttl_days = ttl_days
         self._max_entries = max_entries
         self._lrclib_enabled = lrclib_enabled
+        self._syncedlyrics_enabled = syncedlyrics_enabled
+        self._syncedlyrics_enhanced = syncedlyrics_enhanced
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
         self._conn = sqlite3.connect(str(CACHE_DIR / "cache.db"))
@@ -346,6 +370,28 @@ class LyricsManager(QObject):
             source="lrclib",
         )
 
+
+    @staticmethod
+    def _convert_syncedlyrics_result(result: SyncedLyricsResult) -> LyricsData:
+        if result.synced_lyrics:
+            lrc = parse_lrc(result.synced_lyrics)
+            return LyricsData(
+                artist=result.artist_name,
+                title=result.track_name,
+                synced=True,
+                lrc=lrc,
+                plain_text=result.plain_lyrics,
+                source="syncedlyrics",
+            )
+        return LyricsData(
+            artist=result.artist_name,
+            title=result.track_name,
+            synced=False,
+            lrc=None,
+            plain_text=result.plain_lyrics,
+            source="syncedlyrics",
+        )
+
     # ------------------------------------------------------------------
     #  Public API
     # ------------------------------------------------------------------
@@ -364,7 +410,7 @@ class LyricsManager(QObject):
             self.lyrics_not_found.emit(artist, title)
             return
 
-        if not self._lrclib_enabled:
+        if not self._lrclib_enabled and not self._syncedlyrics_enabled:
             self._cached_alternatives = []
             self.lyrics_not_found.emit(artist, title)
             return
@@ -388,7 +434,15 @@ class LyricsManager(QObject):
             self._worker.wait(2000)
 
         # 4. Start single-result fetch (fast path: 1 HTTP call)
-        self._worker = _FetchPrimaryThread(artist, title, album, duration_ms, self)
+        self._worker = _FetchPrimaryThread(
+            artist,
+            title,
+            album,
+            duration_ms,
+            self._syncedlyrics_enabled,
+            self._syncedlyrics_enhanced,
+            self,
+        )
         self._worker.finished_ok.connect(
             lambda result, a=artist, t=title, k=key, rid=req_id:
                 self._on_fetch_done(result, a, t, k, rid),
@@ -444,7 +498,11 @@ class LyricsManager(QObject):
             self.lyrics_not_found.emit(artist, title)
             return
 
-        primary = self._convert_lrclib_result(result)
+        source, payload = result
+        if source == "syncedlyrics":
+            primary = self._convert_syncedlyrics_result(payload)
+        else:
+            primary = self._convert_lrclib_result(payload)
         self._cached_alternatives = []
         self._last_search_key = key
         self._put_cache(key, primary, [])  # no alternatives yet
@@ -486,6 +544,12 @@ class LyricsManager(QObject):
 
     def set_lrclib_enabled(self, enabled: bool):
         self._lrclib_enabled = enabled
+
+    def set_syncedlyrics_enabled(self, enabled: bool):
+        self._syncedlyrics_enabled = enabled
+
+    def set_syncedlyrics_enhanced(self, enabled: bool):
+        self._syncedlyrics_enhanced = enabled
 
     def set_cache_limits(self, ttl_days: int, max_entries: int):
         self._ttl_days = ttl_days

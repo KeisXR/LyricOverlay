@@ -55,6 +55,9 @@ class OverlayWindow(QWidget):
         self._current_line = -1
         self._previous_line = -1
         self._line_transition = 1.0
+        self._current_word_index = -1
+        self._current_word_progress = 0.0
+        self._current_position_ms = 0
 
         # Loading state
         self._loading = False
@@ -254,6 +257,9 @@ class OverlayWindow(QWidget):
         self._current_line = -1
         self._previous_line = -1
         self._line_transition = 1.0
+        self._current_word_index = -1
+        self._current_word_progress = 0.0
+        self._current_position_ms = 0
         self._shrink_to_content()
         self.update()
 
@@ -266,6 +272,9 @@ class OverlayWindow(QWidget):
         self._current_line = -1
         self._previous_line = -1
         self._line_transition = 1.0
+        self._current_word_index = -1
+        self._current_word_progress = 0.0
+        self._current_position_ms = 0
         self._shrink_to_content()
         self.update()
 
@@ -273,7 +282,9 @@ class OverlayWindow(QWidget):
         if not self._synced or self._parsed_lrc is None:
             return
         offset = self._settings.get("window.lyrics_offset_ms", 0)
-        idx = find_current_line(self._parsed_lrc, position_ms + offset)
+        now_ms = position_ms + offset
+        self._current_position_ms = now_ms
+        idx = find_current_line(self._parsed_lrc, now_ms)
         if idx != self._current_line:
             self._previous_line = self._current_line
             self._current_line = idx
@@ -281,7 +292,59 @@ class OverlayWindow(QWidget):
                 self._animate_line_transition()
             else:
                 self._line_transition = 1.0
-                self.update()
+        self._update_word_progress(now_ms)
+        self.update()
+
+    def _update_word_progress(self, position_ms: int):
+        self._current_word_index = -1
+        self._current_word_progress = 0.0
+        if not self._settings.get("window.karaoke_enabled", True):
+            return
+        if self._current_line < 0 or not self._parsed_lrc:
+            return
+        line = self._parsed_lrc.lines[self._current_line]
+        words = line.words or []
+        if not words:
+            return
+
+        idx = -1
+        for i, word in enumerate(words):
+            if word.timestamp_ms <= position_ms:
+                idx = i
+            else:
+                break
+
+        if idx < 0:
+            return
+        self._current_word_index = idx
+        cur_ts = words[idx].timestamp_ms
+        if idx + 1 < len(words):
+            nxt = words[idx + 1].timestamp_ms
+        else:
+            nxt = max(cur_ts + 1, line.timestamp_ms + 1000)
+        span = max(1, nxt - cur_ts)
+        self._current_word_progress = max(0.0, min(1.0, (position_ms - cur_ts) / span))
+
+    def _draw_karaoke_line(self, painter: QPainter, fm: QFontMetrics, x: int, y: int, text: str, words, highlight_color: QColor):
+        full_w = fm.horizontalAdvance(text)
+        progress_w = 0
+        if self._current_word_index >= 0:
+            parts = text.split()
+            safe_idx = min(self._current_word_index, len(parts) - 1) if parts else -1
+            if safe_idx >= 0:
+                before = " ".join(parts[:safe_idx])
+                cur = parts[safe_idx]
+                before_w = fm.horizontalAdvance(before + (" " if before else ""))
+                cur_w = fm.horizontalAdvance(cur)
+                progress_w = int(before_w + cur_w * self._current_word_progress)
+        progress_w = max(0, min(full_w, progress_w))
+        if progress_w <= 0:
+            return
+        painter.save()
+        painter.setClipRect(QRect(x, y - fm.ascent() - 2, progress_w, fm.height() + 4))
+        painter.setPen(QPen(highlight_color))
+        painter.drawText(x, y, text)
+        painter.restore()
 
     def set_alternatives(self, alternatives: list):
         self._alternatives = alternatives
@@ -430,7 +493,7 @@ class OverlayWindow(QWidget):
         for actual_idx in range(first_line, last_line):
             text = self._display_lines[actual_idx]
             is_current = self._synced and actual_idx == self._current_line
-            color = highlight_color if is_current else text_color
+            color = text_color
 
             text_w = fm.horizontalAdvance(text)
             available_w = self.width() - 20
@@ -446,6 +509,15 @@ class OverlayWindow(QWidget):
 
             painter.setPen(QPen(color))
             painter.drawText(x, y, text)
+            if is_current:
+                words = None
+                if self._parsed_lrc and 0 <= actual_idx < len(self._parsed_lrc.lines):
+                    words = self._parsed_lrc.lines[actual_idx].words
+                if words:
+                    self._draw_karaoke_line(painter, fm, x, y, text, words, highlight_color)
+                else:
+                    painter.setPen(QPen(highlight_color))
+                    painter.drawText(x, y, text)
         painter.restore()
 
         # --- Controls (hover opacity) ---
