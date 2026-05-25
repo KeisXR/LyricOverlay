@@ -10,6 +10,7 @@ project_root = Path(SPECPATH).parent
 src_dir = project_root / "src"
 
 hiddenimports = collect_submodules("websockets")
+hiddenimports += ["platformdirs"]
 excludes = []
 
 if sys.platform == "win32":
