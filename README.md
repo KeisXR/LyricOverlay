@@ -67,7 +67,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 ```bash
 sudo pacman -S pyside6 python-dbus python-gobject python-httpx
-git clone https://github.com/<your-username>/lyricaod.git
+git clone https://github.com/KeisXR/lyricaod.git
 cd lyricaod
 python src/main.py
 ```
@@ -75,7 +75,7 @@ python src/main.py
 #### その他の Linux
 
 ```bash
-git clone https://github.com/<your-username>/lyricaod.git
+git clone https://github.com/KeisXR/lyricaod.git
 cd lyricaod
 bash setup.sh
 .venv/bin/python src/main.py
