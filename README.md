@@ -1,47 +1,45 @@
 # Lyricaod
 
-Desktop lyrics overlay for KDE Plasma. Displays synced lyrics as a transparent, frameless window on top of all other windows, sourced from [LRClib](https://lrclib.net).
+KDE Plasma 向けのデスクトップ歌詞オーバーレイ。MPRIS/SMTC とブラウザ拡張から再生情報を取得し、Syncedlyrics / LRClib で同期歌詞を表示します。
 
-## Features
+## 特長
 
-- **Synced lyrics** — LRC format with line-by-line highlighting, powered by LRClib API
-- **MPRIS integration** — Auto-detects media players (Spotify, Firefox, KDE Connect, etc.) via D-Bus
-- **Browser extension bridge** — Browser tab media metadata can be sent to Lyricaod over local WebSocket (Windows/Linux/macOS)
-- **Transparent overlay** — Frameless, always-on-top, no taskbar entry, doesn't steal focus
-- **Hover controls** — Close, resync, and alternative lyrics buttons fade in on mouse hover. Alternatives are fetched on-demand (one click) to keep the initial load fast.
-- **Dynamic sizing** — Window shrinks to fit displayed text (Wayland-friendly)
-- **Seekbar** — Playback progress bar with timestamp display (toggleable)
-- **Loading indicator** — Shows "⏳ Loading…" while fetching lyrics
-- **SQLite cache** — Fast offline access with TTL and LRU eviction
-- **GUI settings dialog** — Full tabbed settings (Display, Position, Sync, Behavior, Sources) with live preview
-- **Hot-reload settings** — Edit `settings.json` and changes apply instantly
-- **System tray** — Full control via tray menu (font, lines, offset, player switching, settings)
+- **同期歌詞表示** — LRC 行ハイライト + 単語単位ハイライト (Enhanced LRC)
+- **歌詞ソース** — Syncedlyrics 優先、失敗時は LRClib にフォールバック。LRClib から代替候補を取得可能
+- **プレイヤー連携** — Linux: MPRIS (D-Bus)、Windows: SMTC。ブラウザ拡張 (WebSocket) で高精度の再生位置も取得
+- **透明オーバーレイ** — フレームレス・常に手前・フォーカスを奪わない
+- **ホバー操作** — 閉じる/再同期/代替歌詞のボタンがマウスホバーで表示
+- **自動リサイズ** — 表示テキスト量に合わせて最小化
+- **シークバー** — 再生位置の進捗バー
+- **SQLite キャッシュ** — TTL + LRU のキャッシュ
+- **設定ダイアログ** — 表示/位置/同期/動作/歌詞ソースを GUI で調整
+- **設定のホットリロード** — settings.json の編集が即時反映
+- **システムトレイ** — 表示切替やフォント変更などをトレイから操作
 
-## Requirements
+## 対応環境
 
-- **KDE Plasma 6** (Wayland or X11)
-- Windows (Experimental)
+- **KDE Plasma 6** (Wayland / X11)
+- **Windows 10/11** (実験的)
 - **Python 3.12+**
-- System packages: `pyside6`, `python-dbus`, `python-gobject`
 
-## Installation
+### 依存関係
 
-### Downloadable builds
+- Python 依存は `requirements.txt`
+- Linux の追加パッケージ: `pyside6`, `python-dbus`, `python-gobject`
+- ブラウザ連携には `websockets` が必要 (requirements に含まれます)
 
-The easiest way to run Lyricaod is to use a packaged build from GitHub Actions
-or Releases. These builds include Python and the Python dependencies, so users
-do not need to create a venv.
+## インストール
 
-- **Windows**: download `Lyricaod-windows`, extract it, then double-click `Lyricaod.exe`.
-- **Linux**: download `Lyricaod-linux`, extract it, then run `Lyricaod`.
+### 配布ビルド
 
-Linux still needs the normal desktop D-Bus/GObject runtime from the distro. On
-Ubuntu/Debian, install `python3-dbus python3-gi gir1.2-glib-2.0` if MPRIS player
-detection does not start.
+GitHub Actions / Releases のビルドには Python と依存が含まれます。
 
-### Build packages locally
+- **Windows**: `Lyricaod-windows` を展開して `Lyricaod.exe`
+- **Linux**: `Lyricaod-linux` を展開して `Lyricaod`
 
-To create the same clickable package yourself:
+Linux はデスクトップの D-Bus / GObject ランタイムが必要です。Ubuntu/Debian なら `python3-dbus python3-gi gir1.2-glib-2.0` を入れてください。
+
+### ローカルでパッケージを作る
 
 ```powershell
 # Windows PowerShell
@@ -53,104 +51,113 @@ To create the same clickable package yourself:
 bash scripts/build_linux.sh
 ```
 
-The output is written to `dist/Lyricaod/`.
+出力は `dist/Lyricaod/`。`build/` は PyInstaller の一時ファイルのみです。
 
-Do not run files from `build/`; that directory only contains temporary
-PyInstaller build files.
+### ソースから実行
 
-### Arch Linux / Manjaro
+#### Windows
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\setup.ps1
+.\.venv\Scripts\python.exe src\main.py
+```
+
+#### Arch Linux / Manjaro
 
 ```bash
-# Install system dependencies
 sudo pacman -S pyside6 python-dbus python-gobject python-httpx
-
-# Clone and run
 git clone https://github.com/<your-username>/lyricaod.git
 cd lyricaod
 python src/main.py
 ```
 
-### Other distros
+#### その他の Linux
 
 ```bash
-# Clone
 git clone https://github.com/<your-username>/lyricaod.git
 cd lyricaod
-
-# Run the setup script (creates venv, installs deps)
 bash setup.sh
-
-# Run
 .venv/bin/python src/main.py
 ```
 
-## Usage
+## ブラウザ連携
+
+`extension/` を Chrome/Edge/Brave などで「パッケージ化されていない拡張機能」として読み込むと、YouTube Music などの再生位置を高精度に取得できます。
+
+- 既定ポート: `56789` (`settings.json` の `behavior.ws_port`)
+- 接続状態は設定画面の「ブラウザ連携」とトレイで確認できます
+- ポート変更はアプリ再起動が必要
+
+## 使い方
 
 ```bash
-# Normal start
+# 通常起動
 python src/main.py
 
-# Start minimized (tray only)
+# トレイのみで起動
 python src/main.py --minimized
 ```
 
-### Tray Menu
+### トレイメニュー
 
-| Menu Item | Description |
-|-----------|-------------|
-| **Show Lyrics** | Toggle overlay visibility |
-| **Active Player** | Switch between detected MPRIS players |
-| **Visible Lines** | 3 / 5 / 7 / 10 lines |
-| **Lyrics Offset** | ±1000 ms sync adjustment |
-| **Choose Font…** | Font picker dialog |
-| **Text Background** | Semi-transparent bg behind lyrics |
-| **Always on Top** | Window stays above other windows (X11 immediately, Wayland after restart) |
-| **Remember Position** | Save/restore window position (X11) |
-| **Show Seekbar** | Playback progress bar |
-| **Settings...** | Full GUI settings dialog (tabs: Display, Position, Sync, Behavior, Sources) |
-| **Reload Lyrics** | Re-fetch lyrics for current track |
-| **Quit** | Exit the application |
+| 項目 | 内容 |
+|------|------|
+| **歌詞を表示** | オーバーレイ表示の切り替え |
+| **設定...** | 設定ダイアログを開く |
+| **有効なプレイヤー** | 検出されたプレイヤーの切り替え |
+| **ブラウザ接続: ...** | ブラウザ拡張の接続状態表示 |
+| **表示行数** | 3 / 5 / 7 / 10 行 |
+| **歌詞オフセット** | ±1000 ms の同期調整 |
+| **フォントを選択...** | フォント選択ダイアログ |
+| **文字背景** | 文字背景のオン/オフ |
+| **常に手前に表示** | 常に手前に表示（Wayland は再起動が必要） |
+| **位置を記憶** | X11 での位置保存 |
+| **シークバーを表示** | 再生位置バーの表示 |
+| **歌詞を再読み込み** | 現在曲の歌詞を再取得 |
+| **終了** | アプリ終了 |
 
-### Overlay Controls
+### オーバーレイ操作
 
-Hover over the overlay to reveal:
+ホバーすると以下の操作ボタンが表示されます。
 
-| Button | Action |
-|--------|--------|
-| **✕** (top-right) | Hide overlay |
-| **⟳** | Resync — re-fetch lyrics for current track |
-| **⇄** | Fetch/switch alternative lyrics (on-demand, shows "…" while loading) |
-| **Drag anywhere** | Move window (position saved on X11) |
+| ボタン | 動作 |
+|--------|------|
+| **✕** (右上) | オーバーレイを閉じる |
+| **⟳** | 歌詞を再同期 (再取得) |
+| **⇄** | 代替歌詞の取得/切り替え |
+| **ドラッグ** | ウィンドウ移動 (X11 では位置保存) |
 
-### KDE Plasma Wayland always-on-top
+### KDE Plasma Wayland で常に手前に表示
 
-Wayland does not let normal application windows force themselves above every
-other window. On KDE Plasma, the practical solution is a KWin Window Rule:
+Wayland では通常のウィンドウヒントで常に手前表示できないため、KWin ルールを設定します。
 
 ```bash
 python scripts/install_kwin_rule.py
 ```
 
-Disable the rule with:
+無効化:
 
 ```bash
 python scripts/install_kwin_rule.py --disable
 ```
 
-Restart Lyricaod after installing the rule or changing the Always on Top
-setting on Wayland. The app sets a stable Wayland app id (`lyricaod`) and
-overlay window title (`Lyricaod Overlay`) so KWin can match only the lyrics
-overlay and force `Keep above`.
+ルール変更後は Lyricaod を再起動してください。アプリ ID は `lyricaod`、オーバーレイのウィンドウ名は `Lyricaod Overlay` です。
 
-## Configuration
+## 設定
 
-Settings are stored at `~/.config/lyricaod/settings.json`. Edit the file directly for changes to apply at runtime.
+設定ファイルは以下に保存されます。
+
+- Linux/macOS: `$XDG_CONFIG_HOME/lyricaod/settings.json` (未設定なら `~/.config/lyricaod/settings.json`)
+- Windows: `%APPDATA%\\lyricaod\\settings.json`
+
+変更は自動で反映されます。
 
 ```jsonc
 {
   "window": {
     "screen_index": 0,
-    "anchor": "bottom-center",     // top-left | top-center | top-right | center | bottom-left | bottom-center | bottom-right
+    "anchor": "bottom-center", // top-left | top-center | top-right | center | bottom-left | bottom-center | bottom-right
     "offset_x": 0,
     "offset_y": -100,
     "width_pct": 60,
@@ -164,8 +171,9 @@ Settings are stored at `~/.config/lyricaod/settings.json`. Edit the file directl
     "background_enabled": false,
     "background_color": "rgba(0,0,0,0.45)",
     "text_shadow": true,
-    "lyrics_offset_ms": 0,
     "show_seekbar": true,
+    "karaoke_enabled": true,
+    "lyrics_offset_ms": 0,
     "user_x": null,
     "user_y": null
   },
@@ -175,9 +183,12 @@ Settings are stored at `~/.config/lyricaod/settings.json`. Edit the file directl
     "hide_delay_ms": 2000,
     "pinned_player": null,
     "remember_position": true,
-    "always_on_top": true
+    "always_on_top": true,
+    "smtc_position_fallback": true,
+    "ws_port": 56789
   },
   "sources": {
+    "syncedlyrics": { "enabled": true, "enhanced": true },
     "lrclib": { "enabled": true },
     "musixmatch": { "enabled": false, "api_key": "" }
   },
@@ -188,22 +199,26 @@ Settings are stored at `~/.config/lyricaod/settings.json`. Edit the file directl
 }
 ```
 
-## Known Limitations
+キャッシュは `~/.cache/lyricaod/cache.db`（Windows は `%LOCALAPPDATA%\\lyricaod\\cache.db`）に保存されます。
 
-- **Wayland absolute positioning** — Wayland protocol does not allow clients to set absolute window coordinates. `remember_position` is silently ignored on Wayland; only anchor-based placement works.
-- **Wayland always-on-top** — Normal Qt window hints are compositor-controlled. On KDE Plasma, install the KWin rule above for reliable overlay stacking. Other Wayland compositors need compositor-specific support such as layer-shell.
-- **Musixmatch not implemented** — Only LRClib is active.
-- **No global hotkeys** — KDE Global Shortcuts D-Bus API integration is planned.
+## 既知の制限
 
-## Tech Stack
+- **Wayland の絶対座標** — Wayland ではウィンドウ座標の固定ができないため、`remember_position` は無視されます。
+- **Wayland の常に手前表示** — KWin ルールが必要です。他の Wayland コンポジタでは対応が必要です。
+- **Musixmatch は未実装** — UI に項目はありますが動作しません。
+- **Windows のブラウザ再生位置** — SMTC だけでは更新頻度が低い場合があります。ブラウザ拡張または `smtc_position_fallback` を有効にしてください。
+- **グローバルホットキー** — 未実装です。
 
-| Component | Library |
-|-----------|---------|
+## 技術スタック
+
+| 項目 | 使用ライブラリ |
+|------|----------------|
 | UI | PySide6 |
-| D-Bus | dbus-python + GLib |
+| プレイヤー連携 | D-Bus MPRIS / Windows SMTC / Browser WebSocket |
+| 歌詞取得 | syncedlyrics / LRClib |
 | HTTP | httpx |
-| Cache | sqlite3 (stdlib) |
-| Config | json (stdlib) + QFileSystemWatcher |
+| キャッシュ | sqlite3 (stdlib) |
+| 設定 | json (stdlib) + QFileSystemWatcher |
 
 ## License
 
