@@ -57,6 +57,9 @@ if (Test-Path -LiteralPath (Join-Path $ProjectDir "extension")) {
     Copy-Item -Path (Join-Path $ProjectDir "extension") -Destination $ExtensionDestination -Recurse -Force
 }
 
+Write-Host "==> Generating package checksums..."
+Invoke-Native $Python (Join-Path $ProjectDir "scripts\write_checksums.py") generate $PackageDir
+
 $OldBuildDir = Join-Path $ProjectDir "build"
 if (Test-Path -LiteralPath $OldBuildDir) {
     Write-Host "==> Removing old intermediate build files..."
