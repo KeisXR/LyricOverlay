@@ -196,6 +196,7 @@ class Application:
         self.lyrics.lyrics_ready.connect(self._on_lyrics_ready)
         self.lyrics.lyrics_not_found.connect(self._on_lyrics_not_found)
         self.lyrics.alternatives_ready.connect(self._on_alternatives_ready)
+        self._qapp.aboutToQuit.connect(self.lyrics.shutdown)
         self.settings.changed.connect(self._on_settings_changed)
         self._current_meta: dict = {}
 
@@ -242,7 +243,7 @@ class Application:
     #  Signal handlers
     # ------------------------------------------------------------------
 
-    def _on_metadata_changed(self, metadata: dict):
+    def _on_metadata_changed(self, metadata: dict, force_refresh: bool = False):
         artist = metadata.get("artist", "")
         title = metadata.get("title", "")
         album = metadata.get("album", "")
@@ -260,7 +261,14 @@ class Application:
         if title:
             self.overlay.set_loading(True)
             try:
-                self.lyrics.fetch_lyrics(artist, title, album, trackid, length_ms)
+                self.lyrics.fetch_lyrics(
+                    artist,
+                    title,
+                    album,
+                    trackid,
+                    length_ms,
+                    force_refresh=force_refresh,
+                )
             except Exception as exc:
                 print(f"[Main] fetch_lyrics error: {exc}")
                 self.overlay.set_loading(False)
@@ -346,7 +354,7 @@ class Application:
 
     def on_reload(self, metadata: dict):
         """Public entry point for tray 'Reload Lyrics' action."""
-        self._on_metadata_changed(metadata)
+        self._on_metadata_changed(metadata, force_refresh=True)
 
     def _on_overlay_closed(self):
         """Hide the overlay and sync the tray checkbox."""
@@ -359,7 +367,7 @@ class Application:
         self.overlay.set_loading(True)
         meta = self.mpris.get_current_metadata()
         if meta:
-            self._on_metadata_changed(meta)
+            self._on_metadata_changed(meta, force_refresh=True)
         else:
             self.overlay.set_loading(False)
 

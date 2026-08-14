@@ -217,6 +217,7 @@ class LyricsManager(QObject):
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._init_db()
         self._worker: _FetchPrimaryThread | _FetchAltThread | None = None
+        self._live_workers: set[_FetchPrimaryThread | _FetchAltThread] = set()
         self._req_id = 0
         self._last_search_key = ""  # cache key of current search
         self._cached_alternatives: list[LyricsData] = []
@@ -424,38 +425,40 @@ class LyricsManager(QObject):
         album: str = "",
         trackid: str = "",
         duration_ms: int = 0,
+        force_refresh: bool = False,
     ):
         print(f"[Lyrics] search: title=\"{title}\" artist=\"{artist}\" album=\"{album}\"")
 
-        if not title:
-            self.lyrics_not_found.emit(artist, title)
-            return
+        # Bump generation for every call so stale worker results are discarded.
+        self._req_id += 1
+        req_id = self._req_id
 
-        if not self._lrclib_enabled and not self._syncedlyrics_enabled:
+        # Always cooperatively cancel currently running worker without blocking UI.
+        self._cancel_active_worker()
+
+        key = self._make_key(artist, title, trackid)
+        cached, cached_alts = self._get_cached(key)
+
+        if not title:
+            self._last_search_key = ""
             self._cached_alternatives = []
             self.lyrics_not_found.emit(artist, title)
             return
 
-        # 1. Cache check
-        key = self._make_key(artist, title, trackid)
-        cached, cached_alts = self._get_cached(key)
-        if cached:
+        if not self._lrclib_enabled and not self._syncedlyrics_enabled:
+            self._last_search_key = ""
+            self._cached_alternatives = []
+            self.lyrics_not_found.emit(artist, title)
+            return
+
+        if cached and not force_refresh:
+            self._last_search_key = key
             self._cached_alternatives = cached_alts
             result = LyricsResult(primary=cached, alternatives=cached_alts)
             self.lyrics_ready.emit(result)
             return
 
-        # 2. Bump request ID
-        self._req_id += 1
-        req_id = self._req_id
-
-        # 3. Cancel previous worker
-        if self._worker and self._worker.isRunning():
-            self._worker.cancel()
-            self._worker.wait(2000)
-
-        # 4. Start single-result fetch (fast path: 1 HTTP call)
-        self._worker = _FetchPrimaryThread(
+        worker = _FetchPrimaryThread(
             artist,
             title,
             album,
@@ -465,17 +468,18 @@ class LyricsManager(QObject):
             self._syncedlyrics_enhanced,
             self,
         )
-        self._worker.finished_ok.connect(
-            lambda result, a=artist, t=title, k=key, rid=req_id:
-                self._on_fetch_done(result, a, t, k, rid),
+        self._register_worker(worker)
+        worker.finished_ok.connect(
+            lambda result, a=artist, t=title, k=key, rid=req_id, cached_result=cached, cached_result_alts=cached_alts, refresh=force_refresh:
+                self._on_fetch_done(result, a, t, k, rid, cached_result, cached_result_alts, refresh),
             type=Qt.ConnectionType.QueuedConnection,
         )
-        self._worker.finished_error.connect(
-            lambda msg, a=artist, t=title, rid=req_id:
-                self._on_fetch_error(a, t, rid, msg),
+        worker.finished_error.connect(
+            lambda msg, a=artist, t=title, k=key, rid=req_id, cached_result=cached, cached_result_alts=cached_alts, refresh=force_refresh:
+                self._on_fetch_error(a, t, k, rid, msg, cached_result, cached_result_alts, refresh),
             type=Qt.ConnectionType.QueuedConnection,
         )
-        self._worker.start()
+        worker.start()
 
     def fetch_alternatives(
         self,
@@ -491,35 +495,51 @@ class LyricsManager(QObject):
         """
         self._req_id += 1
         req_id = self._req_id
-        key = self._last_search_key
+        self._cancel_active_worker()
 
         if not self._lrclib_enabled:
             print("[LRClib] alternatives skipped: source disabled")
             self.alternatives_ready.emit([])
             return
 
-        # Cancel any running worker (primary or alt)
-        if self._worker and self._worker.isRunning():
-            self._worker.cancel()
-            self._worker.wait(2000)
+        key = self._last_search_key
 
-        self._worker = _FetchAltThread(artist, title, album, duration_ms, self)
-        self._worker.finished_ok.connect(
+        worker = _FetchAltThread(artist, title, album, duration_ms, self)
+        self._register_worker(worker)
+        worker.finished_ok.connect(
             lambda results, k=key, rid=req_id:
                 self._on_alternatives_done(results, k, rid),
             type=Qt.ConnectionType.QueuedConnection,
         )
-        self._worker.finished_error.connect(
-            lambda msg, rid=req_id: self._on_fetch_error("", "", rid, msg),
+        worker.finished_error.connect(
+            lambda msg, rid=req_id: self._on_fetch_error("", "", "", rid, msg),
             type=Qt.ConnectionType.QueuedConnection,
         )
-        self._worker.start()
+        worker.start()
 
-    def _on_fetch_done(self, result, artist, title, key, req_id):
+    def _on_fetch_done(
+        self,
+        result,
+        artist,
+        title,
+        key,
+        req_id,
+        cached_result: LyricsData | None = None,
+        cached_alts: list[LyricsData] | None = None,
+        force_refresh: bool = False,
+    ):
         if req_id != self._req_id:
             return
         self._last_search_key = ""
         if result is None:
+            if force_refresh and cached_result is not None:
+                fallback_alts = list(cached_alts or [])
+                self._last_search_key = key
+                self._cached_alternatives = fallback_alts
+                self.lyrics_ready.emit(
+                    LyricsResult(primary=cached_result, alternatives=fallback_alts)
+                )
+                return
             print(f"[Lyrics] not found: \"{title}\" by \"{artist}\"")
             self._cached_alternatives = []
             self.lyrics_not_found.emit(artist, title)
@@ -551,11 +571,29 @@ class LyricsManager(QObject):
         print(f"[Lyrics] alternatives: {len(alts)} result(s)")
         self.alternatives_ready.emit(alts)
 
-    def _on_fetch_error(self, artist, title, req_id, message: str = ""):
+    def _on_fetch_error(
+        self,
+        artist,
+        title,
+        key,
+        req_id,
+        message: str = "",
+        cached_result: LyricsData | None = None,
+        cached_alts: list[LyricsData] | None = None,
+        force_refresh: bool = False,
+    ):
         if req_id != self._req_id:
             return
         if message:
             print(f"[Lyrics] fetch error: {message}")
+        if force_refresh and cached_result is not None:
+            fallback_alts = list(cached_alts or [])
+            self._last_search_key = key
+            self._cached_alternatives = fallback_alts
+            self.lyrics_ready.emit(
+                LyricsResult(primary=cached_result, alternatives=fallback_alts)
+            )
+            return
         self._cached_alternatives = []
         self.lyrics_not_found.emit(artist, title)
 
@@ -587,3 +625,27 @@ class LyricsManager(QObject):
         self._conn.execute("DELETE FROM cache WHERE fetched_at < ?", (cutoff,))
         self._conn.commit()
         self._enforce_max_entries()
+
+    def shutdown(self):
+        self._req_id += 1
+        for worker in list(self._live_workers):
+            if worker.isRunning():
+                worker.cancel()
+
+    def _register_worker(self, worker: _FetchPrimaryThread | _FetchAltThread):
+        self._live_workers.add(worker)
+        self._worker = worker
+        worker.finished.connect(
+            lambda w=worker: self._release_worker(w),
+            type=Qt.ConnectionType.QueuedConnection,
+        )
+
+    def _release_worker(self, worker: _FetchPrimaryThread | _FetchAltThread):
+        self._live_workers.discard(worker)
+        if self._worker is worker:
+            self._worker = None
+        worker.deleteLater()
+
+    def _cancel_active_worker(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
