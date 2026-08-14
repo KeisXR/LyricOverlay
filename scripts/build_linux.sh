@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Lyricaod Linux package builder.
-# Creates dist/Lyricaod/Lyricaod with bundled Python dependencies.
+# Creates dist/Lyricaod/Lyricaod with the locked Python toolchain.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,9 +26,13 @@ if [ ! -d "${BUILD_VENV}" ]; then
     python3 -m venv --system-site-packages "${BUILD_VENV}"
 fi
 
-echo "==> Installing build dependencies..."
-"${BUILD_VENV}/bin/pip" install --upgrade pip setuptools wheel
-"${BUILD_VENV}/bin/pip" install -r "${PROJECT_DIR}/requirements.txt" pyinstaller
+echo "==> Installing locked build dependencies..."
+"${BUILD_VENV}/bin/python" -m pip install \
+    --disable-pip-version-check \
+    "pip==26.1.1"
+"${BUILD_VENV}/bin/python" -m pip install \
+    --disable-pip-version-check \
+    -r "${PROJECT_DIR}/requirements-build.lock"
 
 echo "==> Building Linux executable..."
 "${BUILD_VENV}/bin/python" -m PyInstaller \
