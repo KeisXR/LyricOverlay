@@ -21,6 +21,23 @@ _SECRET_PATTERN = re.compile(
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 _LRC_PATTERN = re.compile(r"(?:^|\n)\s*\[\d{1,3}:\d{1,2}(?:\.\d+)?\].+")
+_METADATA_MARKERS = (
+    " meta",
+    "metadata",
+    "search:",
+    " found:",
+    "primary:",
+    "alternatives:",
+    "artist=",
+    "title=",
+)
+_FAILURE_MARKERS = (
+    "failed",
+    "error",
+    "exception",
+    "no results",
+    "not found",
+)
 
 
 @dataclass(frozen=True)
@@ -59,18 +76,28 @@ class LoggingStream:
         self._buffer = ""
         self.encoding = "utf-8"
 
+    def _emit(self, line: str) -> None:
+        normalized = line.casefold()
+        level = self._level
+        if self._level == logging.INFO:
+            if any(marker in normalized for marker in _FAILURE_MARKERS):
+                level = logging.WARNING
+            elif any(marker in normalized for marker in _METADATA_MARKERS):
+                level = logging.DEBUG
+        self._logger.log(level, "%s", line.rstrip())
+
     def write(self, value) -> int:
         text = str(value)
         self._buffer += text
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
             if line.strip():
-                self._logger.log(self._level, "%s", line.rstrip())
+                self._emit(line)
         return len(text)
 
     def flush(self):
         if self._buffer.strip():
-            self._logger.log(self._level, "%s", self._buffer.rstrip())
+            self._emit(self._buffer)
         self._buffer = ""
 
     def isatty(self) -> bool:
