@@ -7,6 +7,7 @@ Requires: player -> org.mpris.MediaPlayer2.* on D-Bus session bus.
 """
 
 import time
+from dataclasses import dataclass
 
 import dbus
 from dbus.mainloop.glib import DBusGMainLoop
@@ -20,6 +21,14 @@ MPRIS_PLAYER_IFACE = "org.mpris.MediaPlayer2.Player"
 PROPERTIES_IFACE = "org.freedesktop.DBus.Properties"
 
 DBusGMainLoop(set_as_default=True)
+
+
+@dataclass
+class _TimelineState:
+    position_ms: int = 0
+    position_time: float = 0.0
+    playback_rate: float = 1.0
+    last_sync_latency_ms: int = 20
 
 
 class MprisListener(QObject):
@@ -55,16 +64,12 @@ class MprisListener(QObject):
         super().__init__(parent)
         self._bus = dbus.SessionBus()
 
-        # Per-player state: bus_name -> {"status": str, "metadata": dict|None}
+        # Per-player state:
+        # bus_name -> {"status": str, "metadata": dict|None, "timeline": _TimelineState, "receivers": list}
         self._players: dict[str, dict] = {}
         self._active_player = ""
         self._pinned_player = ""
-
-        # Position interpolation state (for active player)
-        self._position_ms = 0
-        self._position_time = 0.0
-        self._playback_rate = 1.0
-        self._last_sync_latency_ms = 20  # estimated D-Bus RTT, updated at runtime
+        self._name_owner_receiver = None
 
         # --- Timers ---
         # Pump glib events into Qt event loop
@@ -79,7 +84,7 @@ class MprisListener(QObject):
 
         # --- Subscribe to bus events ---
         # NameOwnerChanged: detect new/removed MPRIS players
-        self._bus.add_signal_receiver(
+        self._name_owner_receiver = self._bus.add_signal_receiver(
             self._on_name_owner_changed,
             signal_name="NameOwnerChanged",
             dbus_interface="org.freedesktop.DBus",
@@ -113,14 +118,23 @@ class MprisListener(QObject):
     def _add_player(self, bus_name: str):
         if bus_name in self._players:
             return
-        self._players[bus_name] = {"status": "Stopped", "metadata": None}
+        self._players[bus_name] = {
+            "status": "Stopped",
+            "metadata": None,
+            "timeline": _TimelineState(),
+            "receivers": [],
+        }
         self._subscribe_player(bus_name)
         self.players_changed.emit(list(self._players.keys()))
         if not self._active_player and self._players:
             self._select_active()
 
     def _remove_player(self, bus_name: str):
-        self._players.pop(bus_name, None)
+        player = self._players.pop(bus_name, None)
+        if player:
+            self._disconnect_receivers(player.get("receivers", []))
+        if bus_name == self._pinned_player:
+            self._pinned_player = ""
         self.players_changed.emit(list(self._players.keys()))
         if bus_name == self._active_player:
             self._select_active()
@@ -136,11 +150,14 @@ class MprisListener(QObject):
             def on_props(iface, changed, invalidated, p=bus_name):
                 self._on_properties_changed(p, iface, changed, invalidated)
 
-            props_iface.connect_to_signal("PropertiesChanged", on_props)
-            player_iface.connect_to_signal(
+            props_match = props_iface.connect_to_signal("PropertiesChanged", on_props)
+            seeked_match = player_iface.connect_to_signal(
                 "Seeked",
                 lambda position, p=bus_name: self._on_seeked(p, position),
             )
+            player = self._players.get(bus_name)
+            if player is not None:
+                player["receivers"].extend([props_match, seeked_match])
 
             # Fetch initial state so we have metadata before any signal fires
             self._fetch_initial(bus_name, props_iface)
@@ -185,6 +202,7 @@ class MprisListener(QObject):
         player = self._players.get(bus_name)
         if player is None:
             return
+        timeline: _TimelineState = player["timeline"]
 
         # --- Metadata ---
         if "Metadata" in changed:
@@ -210,25 +228,25 @@ class MprisListener(QObject):
                     # Multiple MPRIS providers (e.g. browser + Plasma
                     # integration) can report the same media and flap.
                     self._select_active()
-                # Re-sync position when playback starts
-                # NOTE: update _position_ms FIRST, then reset the clock so
-                # interpolation starts from the exact sync point.
-                self._sync_position_from_player(bus_name)
+                # Re-sync position only for the selected active player.
+                if bus_name == self._active_player:
+                    self._sync_position_from_player(bus_name)
             elif bus_name == self._active_player and status in ("Paused", "Stopped"):
                 self._select_active()
 
         # --- Rate ---
-        if "Rate" in changed and bus_name == self._active_player:
-            self._playback_rate = float(changed["Rate"])
-            # Re-sync so interpolation starts from the real current position
-            self._sync_position_from_player(bus_name)
+        if "Rate" in changed:
+            timeline.playback_rate = float(changed["Rate"])
+            if bus_name == self._active_player:
+                # Re-sync so interpolation starts from the real current position
+                self._sync_position_from_player(bus_name)
 
         # --- Position (periodic, ~1 Hz from MPRIS) ---
-        if "Position" in changed and bus_name == self._active_player:
+        if "Position" in changed:
             # The Position value in the signal is stale by the D-Bus
             # propagation time. Compensate with our last measured latency.
-            self._position_ms = int(changed["Position"]) // 1000 + self._last_sync_latency_ms
-            self._position_time = time.monotonic()
+            timeline.position_ms = int(changed["Position"]) // 1000 + timeline.last_sync_latency_ms
+            timeline.position_time = time.monotonic()
 
     def _on_seeked(self, bus_name: str, position_us: int):
         """Handle explicit MPRIS seek notifications.
@@ -237,10 +255,12 @@ class MprisListener(QObject):
         so relying on PropertiesChanged alone leaves the local interpolation
         clock offset until the next full sync.
         """
-        if bus_name != self._active_player:
+        player = self._players.get(bus_name)
+        if not player:
             return
-        self._position_ms = int(position_us) // 1000
-        self._position_time = time.monotonic()
+        timeline: _TimelineState = player["timeline"]
+        timeline.position_ms = int(position_us) // 1000
+        timeline.position_time = time.monotonic()
 
     def _sync_position_from_player(self, bus_name: str):
         """Issue a synchronous Get(Position) call to sync the local clock.
@@ -249,16 +269,20 @@ class MprisListener(QObject):
         position so our local interpolation starts from the *actual*
         playback position, not the stale value at call start.
         """
+        player = self._players.get(bus_name)
+        if not player:
+            return
+        timeline: _TimelineState = player["timeline"]
         try:
             t0 = time.monotonic()
             proxy = self._bus.get_object(bus_name, MPRIS_OBJECT_PATH)
             props = dbus.Interface(proxy, PROPERTIES_IFACE)
             pos_us = props.Get(MPRIS_PLAYER_IFACE, "Position")
             t1 = time.monotonic()
-            latency_ms = int((t1 - t0) * 1000.0 * self._playback_rate)
-            self._last_sync_latency_ms = max(0, latency_ms)
-            self._position_ms = int(pos_us) // 1000 + self._last_sync_latency_ms
-            self._position_time = t1
+            latency_ms = int((t1 - t0) * 1000.0 * timeline.playback_rate)
+            timeline.last_sync_latency_ms = max(0, latency_ms)
+            timeline.position_ms = int(pos_us) // 1000 + timeline.last_sync_latency_ms
+            timeline.position_time = t1
         except dbus.DBusException:
             pass
 
@@ -320,10 +344,11 @@ class MprisListener(QObject):
         player = self._players.get(self._active_player)
         if not player or player.get("status") != "Playing":
             return
-        if self._position_time == 0:
+        timeline: _TimelineState = player["timeline"]
+        if timeline.position_time == 0:
             return
-        elapsed = (time.monotonic() - self._position_time) * 1000.0 * self._playback_rate
-        pos = self._position_ms + round(elapsed)
+        elapsed = (time.monotonic() - timeline.position_time) * 1000.0 * timeline.playback_rate
+        pos = timeline.position_ms + round(elapsed)
         meta = player.get("metadata")
         if meta and meta.get("length_ms"):
             pos = min(pos, meta["length_ms"])
@@ -383,7 +408,9 @@ class MprisListener(QObject):
         if bus_name != self._active_player:
             self._active_player = bus_name
             self.active_player_changed.emit(bus_name)
-            self._position_time = 0  # reset; will sync on next Playing/Position event
+            player = self._players.get(bus_name)
+            if player and player.get("status") == "Playing":
+                self._sync_position_from_player(bus_name)
 
     def pin_player(self, bus_name: str):
         self._pinned_player = bus_name
@@ -417,3 +444,23 @@ class MprisListener(QObject):
         if meta.get("artist") and meta.get("album") and meta.get("title"):
             return meta
         return self._enrich_metadata(self._active_player, meta)
+
+    def _disconnect_receivers(self, receivers: list):
+        for receiver in receivers:
+            try:
+                receiver.remove()
+            except Exception:
+                pass
+
+    def stop(self):
+        self._glib_timer.stop()
+        self._pos_timer.stop()
+        if self._name_owner_receiver is not None:
+            try:
+                self._name_owner_receiver.remove()
+            except Exception:
+                pass
+            self._name_owner_receiver = None
+        for player in self._players.values():
+            self._disconnect_receivers(player.get("receivers", []))
+            player["receivers"] = []
