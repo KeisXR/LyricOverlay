@@ -23,8 +23,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev libglib2.0-dev pkg-config libegl1 libopengl0 libxcb-cursor0
-      - name: Apply migration
-        run: python scripts/assistant_package_migration.py
+      - name: Restore migration input and apply package layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_commit=""
+          while read -r commit; do
+            if git cat-file -e "${commit}:src/main.py" 2>/dev/null && \
+               git cat-file -e "${commit}:src/config/settings.py" 2>/dev/null; then
+              source_commit="${commit}"
+              break
+            fi
+          done < <(git rev-list HEAD)
+          test -n "${source_commit}"
+          git checkout "${source_commit}" -- \
+            src/main.py src/meta_utils.py src/logging_setup.py \
+            src/diagnostics.py src/runtime_status.py \
+            src/diagnostic_lyrics_manager.py \
+            src/config src/lyrics src/player src/ui
+          python scripts/assistant_package_migration.py
       - name: Install and verify migrated package
         env:
           QT_QPA_PLATFORM: offscreen
