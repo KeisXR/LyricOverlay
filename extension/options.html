@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>Lyricaod ブラウザ連携設定</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; min-width: 320px; padding: 16px; }
+    label { display: block; margin-bottom: 8px; }
+    input { width: 8em; }
+    #status { min-height: 1.5em; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <label for="port">Lyricaod WebSocketポート</label>
+  <input id="port" type="number" min="1024" max="65535" step="1">
+  <button id="save" type="button">保存</button>
+  <div id="status" role="status" aria-live="polite"></div>
+  <script src="options.js"></script>
+</body>
+</html>
