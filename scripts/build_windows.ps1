@@ -1,5 +1,5 @@
 # Lyricaod Windows package builder.
-# Creates dist\Lyricaod\Lyricaod.exe with bundled Python dependencies.
+# Creates dist\Lyricaod\Lyricaod.exe with the locked Python toolchain.
 
 $ErrorActionPreference = "Stop"
 
@@ -35,11 +35,10 @@ if (-not (Test-Path -LiteralPath $BuildVenv)) {
 }
 
 $Python = Join-Path $BuildVenv "Scripts\python.exe"
-$Pip = Join-Path $BuildVenv "Scripts\pip.exe"
 
-Write-Host "==> Installing build dependencies..."
-Invoke-Native $Python -m pip install --upgrade pip setuptools wheel
-Invoke-Native $Python -m pip install -r (Join-Path $ProjectDir "requirements.txt") pyinstaller
+Write-Host "==> Installing locked build dependencies..."
+Invoke-Native $Python -m pip install --disable-pip-version-check "pip==26.1.1"
+Invoke-Native $Python -m pip install --disable-pip-version-check -r (Join-Path $ProjectDir "requirements-build.lock")
 
 Write-Host "==> Building Windows executable..."
 Invoke-Native $Python -m PyInstaller `
@@ -51,7 +50,11 @@ Invoke-Native $Python -m PyInstaller `
 
 if (Test-Path -LiteralPath (Join-Path $ProjectDir "extension")) {
     Write-Host "==> Copying browser extension files..."
-    Copy-Item -Path (Join-Path $ProjectDir "extension") -Destination (Join-Path $PackageDir "extension") -Recurse -Force
+    $ExtensionDestination = Join-Path $PackageDir "extension"
+    if (Test-Path -LiteralPath $ExtensionDestination) {
+        Remove-Item -LiteralPath $ExtensionDestination -Recurse -Force
+    }
+    Copy-Item -Path (Join-Path $ProjectDir "extension") -Destination $ExtensionDestination -Recurse -Force
 }
 
 $OldBuildDir = Join-Path $ProjectDir "build"
