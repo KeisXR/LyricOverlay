@@ -1,22 +1,20 @@
-"""Metadata normalisation helpers.
+"""Metadata normalisation and search-query helpers.
 
-Cleans up platform-specific noise in track metadata (artist, title)
-before lyrics searches.
+Canonical player metadata is cleaned conservatively. Potentially destructive
+interpretations, such as treating ``"title / artist"`` as two fields, are
+returned as additional search candidates instead of replacing a valid artist
+and title.
 """
+
+from __future__ import annotations
 
 import re
 
-# Matches YouTube Music's auto-generated " - Topic" channel suffix.
 _TOPIC_RE = re.compile(r"\s*-\s*Topic$", re.IGNORECASE)
-
-# Platform/video-page noise that is often appended to browser titles.
 _SITE_SUFFIX_RE = re.compile(
     r"\s*(?:\|\s*(?:YouTube(?: Music)?|Spotify)|-\s*YouTube)$",
     re.IGNORECASE,
 )
-
-# Remove only clearly promotional video labels at the end of the title.  Keep
-# musical version labels such as "acoustic ver." because LRClib may index them.
 _VIDEO_NOISE_RE = re.compile(
     r"\s*[\[(]\s*(?:"
     r"official\s+(?:music\s+)?video|"
@@ -27,19 +25,18 @@ _VIDEO_NOISE_RE = re.compile(
     r")\s*[\])]\s*$",
     re.IGNORECASE,
 )
-
 _TITLE_NOISE_WORD_RE = re.compile(
     r"\b(?:official|video|lyrics?|youtube|spotify)\b",
     re.IGNORECASE,
 )
-
 _ARTIST_TITLE_RE = re.compile(r"^(.{1,80}?)\s+[-–—]\s+(.{2,120})$")
 _TRACK_LENGTH_TOLERANCE_MS = 3000
+_PLACEHOLDER_TITLES = {"youtube music", "youtube", "spotify"}
 
 
 def _strip_repeated_artist_prefix(artist: str, title: str) -> str:
-    for sep in (" - ", " – ", " — "):
-        prefix = f"{artist}{sep}"
+    for separator in (" - ", " – ", " — "):
+        prefix = f"{artist}{separator}"
         if title.casefold().startswith(prefix.casefold()):
             stripped = title[len(prefix):].strip()
             if stripped:
@@ -52,7 +49,21 @@ def _sub_strip_if_changed(pattern: re.Pattern, value: str) -> str:
     return cleaned.strip() if cleaned != value else value
 
 
-_PLACEHOLDER_TITLES = {"youtube music", "youtube", "spotify"}
+def _valid_slash_candidate(title: str) -> tuple[str, str] | None:
+    if " / " not in title:
+        return None
+    title_part, artist_part = title.split(" / ", 1)
+    title_part = title_part.strip()
+    artist_part = artist_part.strip()
+    if (
+        title_part
+        and artist_part
+        and 2 <= len(title_part) <= 120
+        and 1 <= len(artist_part) <= 80
+        and not _TITLE_NOISE_WORD_RE.search(artist_part)
+    ):
+        return artist_part, title_part
+    return None
 
 
 def _is_placeholder_trackid(value: str) -> bool:
@@ -61,37 +72,39 @@ def _is_placeholder_trackid(value: str) -> bool:
 
 def _is_same_track_for_enrichment(base: dict, candidate: dict) -> bool:
     base_trackid = str(base.get("trackid", ""))
-    cand_trackid = str(candidate.get("trackid", ""))
+    candidate_trackid = str(candidate.get("trackid", ""))
     if (
         not _is_placeholder_trackid(base_trackid)
-        and not _is_placeholder_trackid(cand_trackid)
-        and base_trackid == cand_trackid
+        and not _is_placeholder_trackid(candidate_trackid)
+        and base_trackid == candidate_trackid
     ):
         return True
 
     base_title = str(base.get("title", "")).strip().casefold()
-    cand_title = str(candidate.get("title", "")).strip().casefold()
-    if not base_title or base_title != cand_title:
+    candidate_title = str(candidate.get("title", "")).strip().casefold()
+    if not base_title or base_title != candidate_title:
         return False
 
-    base_len = int(base.get("length_ms", 0) or 0)
-    cand_len = int(candidate.get("length_ms", 0) or 0)
+    base_length = int(base.get("length_ms", 0) or 0)
+    candidate_length = int(candidate.get("length_ms", 0) or 0)
     if (
-        base_len > 0
-        and cand_len > 0
-        and abs(base_len - cand_len) > _TRACK_LENGTH_TOLERANCE_MS
+        base_length > 0
+        and candidate_length > 0
+        and abs(base_length - candidate_length) > _TRACK_LENGTH_TOLERANCE_MS
     ):
         return False
 
     base_album = str(base.get("album", "")).strip().casefold()
-    cand_album = str(candidate.get("album", "")).strip().casefold()
-    if base_album and cand_album and base_album != cand_album:
+    candidate_album = str(candidate.get("album", "")).strip().casefold()
+    if base_album and candidate_album and base_album != candidate_album:
         return False
     return True
 
 
-def enrich_missing_meta(base_meta: dict, candidate_metas: list[dict]) -> tuple[dict, bool]:
-    """Fill missing artist/album (artist is preferred over album/title) for the same track."""
+def enrich_missing_meta(
+    base_meta: dict, candidate_metas: list[dict]
+) -> tuple[dict, bool]:
+    """Fill missing artist/album/title from another view of the same track."""
     artist = str(base_meta.get("artist", "")).strip()
     album = str(base_meta.get("album", "")).strip()
     title = str(base_meta.get("title", "")).strip()
@@ -128,20 +141,9 @@ def enrich_missing_meta(base_meta: dict, candidate_metas: list[dict]) -> tuple[d
 
 
 def normalise_yt_meta(artist: str, title: str) -> tuple[str, str]:
-    """Remove YouTube Music noise from artist/title before a lyrics search.
-
-    Two patterns are handled:
-
-    1. ``"Artist - Topic"`` — YouTube auto-generates a channel with this
-       suffix for artists.  LRClib knows the artist without the suffix.
-
-    2. ``"Song Title / Original Artist"`` — YouTube Music sometimes embeds
-       the original artist inside the title when the uploader is different
-       from the credited artist.  In that case we extract the embedded
-       artist and use the left-hand part as the clean title.
-    """
-    artist = _TOPIC_RE.sub("", artist).strip()
-    title = _sub_strip_if_changed(_SITE_SUFFIX_RE, title)
+    """Conservatively clean browser/player noise from canonical metadata."""
+    artist = _TOPIC_RE.sub("", artist or "").strip()
+    title = _sub_strip_if_changed(_SITE_SUFFIX_RE, title or "")
     title = _sub_strip_if_changed(_VIDEO_NOISE_RE, title)
 
     if artist:
@@ -163,21 +165,36 @@ def normalise_yt_meta(artist: str, title: str) -> tuple[str, str]:
     if not artist and title.strip().casefold() in _PLACEHOLDER_TITLES:
         return "", ""
 
-    if " / " in title:
-        # Split only on the first " / " so titles like
-        # "Song / Artist / Extra" become title="Song", artist="Artist / Extra"
-        # rather than stopping at the wrong boundary.
-        title_part, artist_part = title.split(" / ", 1)
-        title_part = title_part.strip()
-        artist_part = artist_part.strip()
-        if (
-            title_part
-            and artist_part
-            and 2 <= len(title_part) <= 120
-            and 1 <= len(artist_part) <= 80
-            and not _TITLE_NOISE_WORD_RE.search(artist_part)
-        ):
-            artist = artist_part
-            title = title_part
+    # Only replace canonical metadata when artist is absent. When an artist is
+    # already present, slash parsing is exposed by search_query_candidates().
+    if not artist:
+        slash_candidate = _valid_slash_candidate(title)
+        if slash_candidate:
+            artist, title = slash_candidate
 
     return artist, title
+
+
+def search_query_candidates(artist: str, title: str) -> list[tuple[str, str]]:
+    """Return stable lookup variants without mutating canonical metadata.
+
+    The first entry is always the conservative canonical pair. A plausible
+    ``title / artist`` interpretation is appended as a fallback so browser
+    uploader metadata can still resolve while valid titles such as
+    ``"Love / Hate"`` remain intact for display and caching.
+    """
+    canonical_artist, canonical_title = normalise_yt_meta(artist, title)
+    candidates = [(canonical_artist, canonical_title)]
+
+    slash_candidate = _valid_slash_candidate(canonical_title)
+    if slash_candidate and slash_candidate not in candidates:
+        candidates.append(slash_candidate)
+
+    deduplicated: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate_artist, candidate_title in candidates:
+        key = (candidate_artist.casefold(), candidate_title.casefold())
+        if candidate_title and key not in seen:
+            seen.add(key)
+            deduplicated.append((candidate_artist, candidate_title))
+    return deduplicated or [("", "")]
