@@ -20,8 +20,7 @@ class _WebSocketThread(QThread):
     """Background thread that runs an asyncio WebSocket server."""
 
     state_ready = Signal(object)  # dict | None
-    connected = Signal()
-    disconnected = Signal()
+    connection_count_changed = Signal(int)
 
     def __init__(self, port: int, parent: QObject | None = None):
         super().__init__(parent)
@@ -29,6 +28,7 @@ class _WebSocketThread(QThread):
         self._running = True
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server = None
+        self._connection_count = 0
 
     def stop(self):
         self._running = False
@@ -36,24 +36,30 @@ class _WebSocketThread(QThread):
             self._loop.call_soon_threadsafe(lambda: None)
 
     async def _handler(self, websocket):
-        self.connected.emit()
+        self._connection_count += 1
+        self.connection_count_changed.emit(self._connection_count)
         try:
             async for message in websocket:
                 if not self._running:
                     break
                 try:
                     data = json.loads(message)
-                    self.state_ready.emit(data)
-                except json.JSONDecodeError:
+                    if isinstance(data, dict):
+                        self.state_ready.emit(data)
+                except (TypeError, ValueError, json.JSONDecodeError):
                     pass
         finally:
-            self.disconnected.emit()
+            self._connection_count = max(0, self._connection_count - 1)
+            self.connection_count_changed.emit(self._connection_count)
 
     async def _run_server(self):
         import websockets
 
         self._server = await websockets.serve(
-            self._handler, "127.0.0.1", self._port
+            self._handler,
+            "127.0.0.1",
+            self._port,
+            max_size=64 * 1024,
         )
         try:
             while self._running:
@@ -102,6 +108,13 @@ class BrowserWsListener(QObject):
     players_changed = Signal(list)
     active_player_changed = Signal(str)
     connection_changed = Signal(bool)
+    media_active_changed = Signal(bool)
+
+    _PROTOCOL_VERSION = 1
+    _MAX_TEXT_LENGTH = 1024
+    _STALE_TIMEOUT_SEC = 8.0
+    _MAX_POSITION_SEC = 60 * 60 * 24 * 2
+    _MAX_DURATION_SEC = 60 * 60 * 24 * 2
 
     def __init__(self, parent: QObject | None = None, *, port: int = 56789):
         super().__init__(parent)
@@ -113,6 +126,9 @@ class BrowserWsListener(QObject):
         self._pinned_player = ""
         self._players: list[str] = []
         self._connected = False
+        self._connection_count = 0
+        self._media_active = False
+        self._last_state_time = 0.0
 
         # Position interpolation state
         self._position_ms = 0
@@ -123,8 +139,7 @@ class BrowserWsListener(QObject):
         # Background WebSocket server thread
         self._ws_thread = _WebSocketThread(port, self)
         self._ws_thread.state_ready.connect(self._on_state)
-        self._ws_thread.connected.connect(self._on_connected)
-        self._ws_thread.disconnected.connect(self._on_disconnected)
+        self._ws_thread.connection_count_changed.connect(self._on_connection_count_changed)
         self._ws_thread.start()
 
         # High-frequency position interpolation (~60 Hz)
@@ -136,25 +151,14 @@ class BrowserWsListener(QObject):
     #  Connection lifecycle
     # ------------------------------------------------------------------
 
-    def _on_connected(self):
-        if not self._connected:
-            self._connected = True
-            self._players = ["browser-ws"]
-            self.players_changed.emit(self._players)
-            self._active_player = "browser-ws"
-            self.active_player_changed.emit("browser-ws")
-            self.connection_changed.emit(True)
-
-    def _on_disconnected(self):
-        if self._connected:
-            self._connected = False
-            self._players = []
-            self.players_changed.emit([])
-            self._active_player = ""
-            self.active_player_changed.emit("")
-            self.connection_changed.emit(False)
-            self._status = "Stopped"
-            self.playback_state_changed.emit("Stopped", "browser-ws")
+    def _on_connection_count_changed(self, count: int):
+        self._connection_count = max(0, int(count))
+        connected = self._connection_count > 0
+        if connected != self._connected:
+            self._connected = connected
+            self.connection_changed.emit(connected)
+        if not connected:
+            self._deactivate_media()
 
     # ------------------------------------------------------------------
     #  State update handler
@@ -167,21 +171,23 @@ class BrowserWsListener(QObject):
             print(f"[BrowserWS] _on_state error: {exc}", flush=True)
 
     def _on_state_impl(self, data: dict):
-        title = (data.get("title") or "").strip()
-        artist = (data.get("artist") or "").strip()
-        album = (data.get("album") or "").strip()
-        status_raw = data.get("status", "Stopped")
-        pos_sec = self._safe_float(data.get("position"), 0.0)
-        dur_sec = self._safe_float(data.get("duration"), 0.0)
-        rate = self._safe_float(data.get("rate"), 1.0)
+        state = self._validate_payload(data)
+        if state is None:
+            return
 
-        if status_raw in ("Playing", "Paused", "Stopped"):
-            status = status_raw
-        else:
-            status = "Stopped"
+        self._last_state_time = time.monotonic()
+        title = state["title"]
+        artist = state["artist"]
+        album = state["album"]
+        status = state["status"]
+        pos_sec = state["position"]
+        dur_sec = state["duration"]
+        rate = state["rate"]
 
         pos_ms = round(pos_sec * 1000)
         length_ms = round(dur_sec * 1000)
+
+        self._set_media_active(self._is_candidate_state(title, status))
 
         # --- Metadata ---
         new_meta = {
@@ -204,7 +210,8 @@ class BrowserWsListener(QObject):
                 f"[BrowserWS] meta → artist=\"{artist}\" title=\"{title}\"",
                 flush=True,
             )
-            self.metadata_changed.emit(new_meta)
+            if self._media_active:
+                self.metadata_changed.emit(new_meta)
 
         # --- Playback status ---
         old_status = self._status
@@ -212,7 +219,8 @@ class BrowserWsListener(QObject):
         if status_changed:
             print(f"[BrowserWS] status {old_status} → {status}", flush=True)
             self._status = status
-            self.playback_state_changed.emit(status, "browser-ws")
+            if self._media_active or status == "Stopped":
+                self.playback_state_changed.emit(status, "browser-ws")
 
         # --- Position handling ---
         if status == "Playing":
@@ -247,7 +255,8 @@ class BrowserWsListener(QObject):
             self._position_ms = pos_ms
             self._position_time = 0.0
             self._last_reported_pos_ms = pos_ms
-            self.position_changed.emit(pos_ms)
+            if self._media_active:
+                self.position_changed.emit(pos_ms)
 
     @staticmethod
     def _safe_float(value, default: float) -> float:
@@ -258,6 +267,7 @@ class BrowserWsListener(QObject):
         return number if math.isfinite(number) else default
 
     def _tick_position(self):
+        self._enforce_freshness()
         if self._status != "Playing" or self._position_time == 0:
             return
         elapsed = (
@@ -292,13 +302,18 @@ class BrowserWsListener(QObject):
         return self._active_player
 
     def get_player_status(self, player_id: str) -> str:
-        return self._status if player_id == "browser-ws" else "Unknown"
+        if player_id != "browser-ws":
+            return "Unknown"
+        return self._status if self._media_active else "Stopped"
 
     def get_current_metadata(self) -> dict | None:
-        return self._current_meta if self._current_meta else None
+        return self._current_meta if self._media_active and self._current_meta else None
 
     def is_connected(self) -> bool:
         return self._connected
+
+    def is_media_active(self) -> bool:
+        return self._media_active
 
     def get_port(self) -> int:
         return self._port
@@ -307,3 +322,102 @@ class BrowserWsListener(QObject):
         self._pos_timer.stop()
         self._ws_thread.stop()
         self._ws_thread.wait(2000)
+
+    def _set_media_active(self, active: bool):
+        if active == self._media_active:
+            return
+        self._media_active = active
+        self.media_active_changed.emit(active)
+        if active:
+            self._players = ["browser-ws"]
+            self._active_player = "browser-ws"
+            self.players_changed.emit(self._players)
+            self.active_player_changed.emit("browser-ws")
+            return
+        self._players = []
+        self._active_player = ""
+        self.players_changed.emit([])
+        self.active_player_changed.emit("")
+
+    def _deactivate_media(self):
+        self._set_media_active(False)
+        self._position_time = 0.0
+        if self._status != "Stopped":
+            self._status = "Stopped"
+            self.playback_state_changed.emit("Stopped", "browser-ws")
+
+    def _enforce_freshness(self):
+        if not self._media_active:
+            return
+        if not self._connected:
+            self._deactivate_media()
+            return
+        if self._last_state_time <= 0:
+            return
+        if (time.monotonic() - self._last_state_time) > self._STALE_TIMEOUT_SEC:
+            self._deactivate_media()
+
+    def _validate_payload(self, data: dict) -> dict | None:
+        if not isinstance(data, dict):
+            return None
+        if data.get("protocol_version") != self._PROTOCOL_VERSION:
+            return None
+        sequence = data.get("sequence")
+        if not isinstance(sequence, int) or sequence < 0:
+            return None
+        observed = self._safe_float(data.get("observed_at_ms"), -1.0)
+        if observed < 0:
+            return None
+        source = data.get("source")
+        if not isinstance(source, dict):
+            return None
+        tab_id = source.get("tab_id")
+        frame_id = source.get("frame_id")
+        if not isinstance(tab_id, int) or not isinstance(frame_id, int):
+            return None
+        state = data.get("state")
+        if not isinstance(state, dict):
+            return None
+        title = self._safe_text(state.get("title", ""))
+        artist = self._safe_text(state.get("artist", ""))
+        album = self._safe_text(state.get("album", ""))
+        if title is None or artist is None or album is None:
+            return None
+        status = state.get("status", "Stopped")
+        if status not in ("Playing", "Paused", "Stopped"):
+            return None
+        position = self._safe_float(state.get("position"), -1.0)
+        duration = self._safe_float(state.get("duration"), -1.0)
+        rate = self._safe_float(state.get("rate"), -1.0)
+        if (
+            position < 0
+            or position > self._MAX_POSITION_SEC
+            or duration < 0
+            or duration > self._MAX_DURATION_SEC
+            or rate <= 0
+            or rate > 16.0
+        ):
+            return None
+        return {
+            "title": title,
+            "artist": artist,
+            "album": album,
+            "status": status,
+            "position": position,
+            "duration": duration,
+            "rate": rate,
+        }
+
+    def _safe_text(self, value) -> str | None:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if len(text) > self._MAX_TEXT_LENGTH:
+            return None
+        return text
+
+    @staticmethod
+    def _is_candidate_state(title: str, status: str) -> bool:
+        return bool(title) and status in ("Playing", "Paused")
