@@ -62,15 +62,34 @@ def test_file_logging_failure_uses_fallback_handler(tmp_path):
     assert logging.getLogger(logging_setup.LOGGER_NAME).handlers
 
 
-def test_capture_legacy_prints_only_changes_frozen_process(monkeypatch):
+def test_capture_legacy_prints_only_changes_frozen_process(
+    tmp_path, monkeypatch
+):
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     try:
-        logging_setup.configure_logging(console=False)
+        logging_setup.configure_logging(log_dir=tmp_path, console=False)
         logging_setup.capture_legacy_prints()
         assert isinstance(sys.stdout, logging_setup.LoggingStream)
         assert isinstance(sys.stderr, logging_setup.LoggingStream)
     finally:
         sys.stdout = original_stdout
         sys.stderr = original_stderr
+
+
+def test_captured_metadata_is_debug_only(tmp_path):
+    state = logging_setup.configure_logging(
+        log_dir=tmp_path, console=False, level=logging.INFO
+    )
+    stream = logging_setup.LoggingStream(
+        logging_setup.get_logger("stdout"), logging.INFO
+    )
+    stream.write('[MPRIS] meta: title="Song" artist="Artist"\n')
+    stream.write("[MPRIS] Failed to subscribe\n")
+    _flush_logger()
+
+    content = state.log_file.read_text(encoding="utf-8")
+    assert "Song" not in content
+    assert "Artist" not in content
+    assert "Failed to subscribe" in content
