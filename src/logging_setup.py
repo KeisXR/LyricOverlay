@@ -39,13 +39,42 @@ class PrivacyFilter(logging.Filter):
             message = record.getMessage()
         except Exception:
             return True
-        message = _SECRET_PATTERN.sub(lambda match: f"{match.group(1)}=<redacted>", message)
+        message = _SECRET_PATTERN.sub(
+            lambda match: f"{match.group(1)}=<redacted>", message
+        )
         message = _BEARER_PATTERN.sub("Bearer <redacted>", message)
         if _LRC_PATTERN.search(message):
             message = _LRC_PATTERN.sub("\n<lyrics-redacted>", message)
         record.msg = message
         record.args = ()
         return True
+
+
+class LoggingStream:
+    """Line-buffered stream used to capture legacy ``print`` calls."""
+
+    def __init__(self, logger: logging.Logger, level: int):
+        self._logger = logger
+        self._level = level
+        self._buffer = ""
+        self.encoding = "utf-8"
+
+    def write(self, value) -> int:
+        text = str(value)
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line.strip():
+                self._logger.log(self._level, "%s", line.rstrip())
+        return len(text)
+
+    def flush(self):
+        if self._buffer.strip():
+            self._logger.log(self._level, "%s", self._buffer.rstrip())
+        self._buffer = ""
+
+    def isatty(self) -> bool:
+        return False
 
 
 def default_log_dir() -> Path:
@@ -136,10 +165,20 @@ def configure_logging(
         fallback = True
 
     if error:
-        logger.warning("File logging unavailable; using fallback handler: %s", error)
+        logger.warning(
+            "File logging unavailable; using fallback handler: %s", error
+        )
     else:
         logger.debug("Logging initialized at %s", log_file)
     return LoggingState(target_dir, log_file, fallback, error)
+
+
+def capture_legacy_prints() -> None:
+    """Route legacy module ``print`` output into the file logger in GUI builds."""
+    if not bool(getattr(sys, "frozen", False)):
+        return
+    sys.stdout = LoggingStream(get_logger("stdout"), logging.INFO)
+    sys.stderr = LoggingStream(get_logger("stderr"), logging.ERROR)
 
 
 def get_logger(name: str) -> logging.Logger:
