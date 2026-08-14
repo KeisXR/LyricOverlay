@@ -44,6 +44,8 @@ jobs:
         run: ruff check src tests
       - name: Incremental type check
         run: mypy src/lyrics/lrc_parser.py src/meta_utils.py src/ui/color_utils.py
+      - name: Noninteractive diagnostics
+        run: python src/main.py --diagnose | python -m json.tool > /dev/null
       - name: Unit and offscreen Qt tests
         env:
           QT_QPA_PLATFORM: offscreen
@@ -68,13 +70,16 @@ jobs:
         run: python -m compileall -q src tests
       - name: Ruff correctness checks
         run: ruff check src tests
+      - name: Noninteractive diagnostics
+        shell: pwsh
+        run: python src/main.py --diagnose | python -m json.tool | Out-Null
       - name: Unit tests
         env:
           QT_QPA_PLATFORM: offscreen
         run: pytest -q
 
   linux-package:
-    name: Linux package and smoke test
+    name: Linux package and self-test
     needs: quality
     runs-on: ubuntu-24.04
     steps:
@@ -87,10 +92,10 @@ jobs:
             libegl1 libopengl0 libxcb-cursor0
       - name: Build locked package
         run: bash scripts/build_linux.sh
-      - name: Smoke-test packaged executable
+      - name: Self-test packaged executable
         env:
           QT_QPA_PLATFORM: offscreen
-        run: timeout 30s dist/Lyricaod/Lyricaod --help
+        run: timeout 30s dist/Lyricaod/Lyricaod --self-test
       - name: Preserve executable permissions
         run: tar -czf dist/Lyricaod-linux.tar.gz -C dist Lyricaod
       - name: Upload tested package
@@ -101,7 +106,7 @@ jobs:
           if-no-files-found: error
 
   windows-package:
-    name: Windows package and smoke test
+    name: Windows package and self-test
     needs: [quality, windows-test]
     runs-on: windows-2025
     steps:
@@ -114,9 +119,9 @@ jobs:
       - name: Build locked package
         shell: pwsh
         run: .\scripts\build_windows.ps1
-      - name: Smoke-test packaged executable
+      - name: Self-test packaged executable
         shell: pwsh
-        run: .\dist\Lyricaod\Lyricaod.exe --help
+        run: .\dist\Lyricaod\Lyricaod.exe --self-test
       - name: Create package archive
         shell: pwsh
         run: Compress-Archive -Path .\dist\Lyricaod -DestinationPath .\dist\Lyricaod-windows.zip -Force
