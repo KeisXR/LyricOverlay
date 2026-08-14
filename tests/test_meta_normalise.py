@@ -1,175 +1,125 @@
-"""Unit tests for normalise_yt_meta in meta_utils.py."""
+"""Tests for conservative player metadata normalisation."""
 
 import sys
 
 sys.path.insert(0, "src")
 
-from meta_utils import enrich_missing_meta, normalise_yt_meta
+from meta_utils import enrich_missing_meta, normalise_yt_meta, search_query_candidates
 
 
-# ---------------------------------------------------------------------------
-# " - Topic" stripping
-# ---------------------------------------------------------------------------
-
-def test_strips_topic_suffix():
-    artist, title = normalise_yt_meta("Mewhan - Topic", "ぼくのフレンド（acoustic ver.）")
-    assert artist == "Mewhan"
-    assert title == "ぼくのフレンド（acoustic ver.）"
+def test_strips_topic_suffix_case_insensitively():
+    assert normalise_yt_meta("Mewhan - TOPIC", "A Song") == (
+        "Mewhan",
+        "A Song",
+    )
 
 
-def test_strips_topic_suffix_case_insensitive():
-    artist, title = normalise_yt_meta("Some Artist - TOPIC", "A Song")
-    assert artist == "Some Artist"
-    assert title == "A Song"
+def test_does_not_strip_non_topic_artist_text():
+    assert normalise_yt_meta("FUNKY MONKEY BΛBY'S", "ヒーロー") == (
+        "FUNKY MONKEY BΛBY'S",
+        "ヒーロー",
+    )
 
 
-def test_strips_topic_suffix_with_extra_spaces():
-    artist, title = normalise_yt_meta("Some Artist  -  Topic", "A Song")
-    assert artist == "Some Artist"
+def test_artist_present_preserves_valid_slash_title():
+    assert normalise_yt_meta("Actual Artist", "Love / Hate") == (
+        "Actual Artist",
+        "Love / Hate",
+    )
 
 
-def test_does_not_strip_non_topic_suffix():
-    artist, title = normalise_yt_meta("FUNKY MONKEY BΛBY'S", "ヒーロー")
-    assert artist == "FUNKY MONKEY BΛBY'S"
-    assert title == "ヒーロー"
+def test_slash_interpretation_is_an_additional_search_candidate():
+    assert search_query_candidates("Uploader", "Song / Real Artist") == [
+        ("Uploader", "Song / Real Artist"),
+        ("Real Artist", "Song"),
+    ]
 
 
-def test_strips_topic_with_band_name():
-    artist, title = normalise_yt_meta("FUNKY MONKEY BΛBY'S - Topic", "ヒーロー")
-    assert artist == "FUNKY MONKEY BΛBY'S"
-    assert title == "ヒーロー"
+def test_artist_missing_can_use_clear_slash_metadata():
+    assert normalise_yt_meta("", "Song / Real Artist") == (
+        "Real Artist",
+        "Song",
+    )
 
 
-# ---------------------------------------------------------------------------
-# " / original-artist" extraction from title
-# ---------------------------------------------------------------------------
-
-def test_splits_title_slash_artist():
-    artist, title = normalise_yt_meta("Steven Mak", "ぼくのフレンド / みゆはん")
-    assert title == "ぼくのフレンド"
-    assert artist == "みゆはん"
+def test_does_not_split_slash_without_spaces():
+    assert normalise_yt_meta("AC/DC", "Highway to Hell") == (
+        "AC/DC",
+        "Highway to Hell",
+    )
 
 
-def test_splits_title_slash_and_topic():
-    # Both patterns together: "- Topic" in artist AND "/ artist" in title.
-    # The embedded artist from the title should win.
-    artist, title = normalise_yt_meta("SomeUploader - Topic", "Song / RealArtist")
-    assert title == "Song"
-    assert artist == "RealArtist"
+def test_empty_or_promotional_slash_parts_are_not_candidates():
+    assert search_query_candidates("Artist", "Song / ") == [("Artist", "Song / ")]
+    assert search_query_candidates("Artist", " / Other") == [("Artist", " / Other")]
+    assert search_query_candidates("Artist", "Song / Official Video") == [
+        ("Artist", "Song / Official Video")
+    ]
 
 
-def test_does_not_split_on_slash_without_spaces():
-    # "AC/DC" style — no spaces around slash, must not be split.
-    artist, title = normalise_yt_meta("AC/DC", "Highway to Hell")
-    assert artist == "AC/DC"
-    assert title == "Highway to Hell"
+def test_multiple_slashes_keep_canonical_and_offer_one_fallback():
+    assert search_query_candidates("Uploader", "Song / Real Artist / Extra") == [
+        ("Uploader", "Song / Real Artist / Extra"),
+        ("Real Artist / Extra", "Song"),
+    ]
 
 
-def test_does_not_split_title_without_slash():
-    artist, title = normalise_yt_meta("Artist", "Plain Song Title")
-    assert artist == "Artist"
-    assert title == "Plain Song Title"
-
-
-def test_empty_right_of_slash_not_used():
-    # Degenerate case: " / " present but nothing after it.
-    artist, title = normalise_yt_meta("Original Artist", "Song / ")
-    assert artist == "Original Artist"
-    assert title == "Song / "
-
-
-def test_empty_left_of_slash_not_used():
-    artist, title = normalise_yt_meta("Original Artist", " / Artist")
-    assert artist == "Original Artist"
-    assert title == " / Artist"
-
-
-def test_video_word_right_of_slash_not_used_as_artist():
-    artist, title = normalise_yt_meta("Original Artist", "Song / Official Video")
-    assert artist == "Original Artist"
-    assert title == "Song / Official Video"
-
-
-def test_multiple_slash_separators():
-    # Only the first " / " is used; everything after it becomes the artist.
-    artist, title = normalise_yt_meta("Uploader", "Song / Real Artist / Extra")
-    assert title == "Song"
-    assert artist == "Real Artist / Extra"
-
-
-# ---------------------------------------------------------------------------
-# Browser/video title cleanup
-# ---------------------------------------------------------------------------
-
-def test_strips_site_suffixes_from_title():
-    artist, title = normalise_yt_meta("Artist", "Song | YouTube Music")
-    assert artist == "Artist"
-    assert title == "Song"
-
-
-def test_strips_official_video_noise():
-    artist, title = normalise_yt_meta("Artist", "Song (Official Music Video)")
-    assert artist == "Artist"
-    assert title == "Song"
-
-
-def test_strips_lyric_video_noise_in_brackets():
-    artist, title = normalise_yt_meta("Artist", "Song [Lyric Video]")
-    assert artist == "Artist"
-    assert title == "Song"
+def test_strips_site_suffixes_and_video_noise():
+    assert normalise_yt_meta("Artist", "Song | YouTube Music") == (
+        "Artist",
+        "Song",
+    )
+    assert normalise_yt_meta("Artist", "Song (Official Music Video)") == (
+        "Artist",
+        "Song",
+    )
+    assert normalise_yt_meta("Artist", "Song [Lyric Video]") == (
+        "Artist",
+        "Song",
+    )
 
 
 def test_keeps_musical_version_label():
-    artist, title = normalise_yt_meta("Artist", "Song (acoustic ver.)")
-    assert artist == "Artist"
-    assert title == "Song (acoustic ver.)"
+    assert normalise_yt_meta("Artist", "Song (acoustic ver.)") == (
+        "Artist",
+        "Song (acoustic ver.)",
+    )
 
 
-def test_splits_browser_artist_title_when_artist_empty():
-    artist, title = normalise_yt_meta("", "Official髭男dism - らしさ [Official Audio]")
-    assert artist == "Official髭男dism"
-    assert title == "らしさ"
+def test_splits_browser_artist_title_when_artist_is_empty():
+    assert normalise_yt_meta(
+        "", "Official髭男dism - らしさ [Official Audio]"
+    ) == ("Official髭男dism", "らしさ")
 
 
 def test_strips_repeated_artist_prefix_when_artist_present():
-    artist, title = normalise_yt_meta(
+    assert normalise_yt_meta(
         "Official髭男dism",
         "Official髭男dism - らしさ [Official Audio]",
+    ) == ("Official髭男dism", "らしさ")
+
+
+def test_does_not_split_subtitle_dash_when_artist_present():
+    assert normalise_yt_meta("Artist", "Song - Subtitle") == (
+        "Artist",
+        "Song - Subtitle",
     )
-    assert artist == "Official髭男dism"
-    assert title == "らしさ"
 
 
-def test_does_not_split_dash_title_when_artist_present():
-    artist, title = normalise_yt_meta("Artist", "Song - Subtitle")
-    assert artist == "Artist"
-    assert title == "Song - Subtitle"
+def test_drops_placeholder_site_title_only_without_artist():
+    assert normalise_yt_meta("", "YouTube Music") == ("", "")
+    assert normalise_yt_meta("Artist", "YouTube Music") == (
+        "Artist",
+        "YouTube Music",
+    )
 
 
-# ---------------------------------------------------------------------------
-# No-op cases
-# ---------------------------------------------------------------------------
-
-def test_passthrough_when_no_patterns():
-    artist, title = normalise_yt_meta("みゆはん", "ぼくのフレンド")
-    assert artist == "みゆはん"
-    assert title == "ぼくのフレンド"
+def test_empty_strings_are_safe():
+    assert normalise_yt_meta("", "") == ("", "")
+    assert search_query_candidates("", "") == [("", "")]
 
 
-
-
-def test_drops_placeholder_site_title_when_artist_empty():
-    artist, title = normalise_yt_meta("", "YouTube Music")
-    assert artist == ""
-    assert title == ""
-
-def test_empty_strings():
-    artist, title = normalise_yt_meta("", "")
-    assert artist == ""
-    assert title == ""
-
-
-def test_enriches_missing_artist_and_album_from_same_title():
+def test_enriches_missing_artist_and_album_for_same_track():
     base = {
         "title": "らしさ",
         "artist": "",
@@ -184,67 +134,37 @@ def test_enriches_missing_artist_and_album_from_same_title():
         "trackid": "/",
         "length_ms": 254500,
     }
+
     merged, changed = enrich_missing_meta(base, [candidate])
+
     assert changed is True
     assert merged["artist"] == "Official髭男dism"
     assert merged["album"] == "Traveler"
     assert merged["title"] == "らしさ"
 
 
-def test_does_not_enrich_when_title_differs():
+def test_does_not_enrich_different_title_or_duration():
     base = {
         "title": "らしさ",
         "artist": "",
         "album": "",
-        "trackid": "/org/mpris/MediaPlayer2/track/123",
+        "trackid": "/",
         "length_ms": 254000,
     }
-    candidate = {
+    different_title = {
         "title": "Pretender",
         "artist": "Official髭男dism",
         "album": "Traveler",
         "trackid": "/",
         "length_ms": 254000,
     }
-    merged, changed = enrich_missing_meta(base, [candidate])
-    assert changed is False
-    assert merged["artist"] == ""
-    assert merged["album"] == ""
+    different_duration = {
+        "title": "らしさ",
+        "artist": "Official髭男dism",
+        "album": "Traveler",
+        "trackid": "/",
+        "length_ms": 300000,
+    }
 
-
-if __name__ == "__main__":
-    import traceback
-
-    tests = [
-        ("strips_topic_suffix", test_strips_topic_suffix),
-        ("strips_topic_suffix_case_insensitive", test_strips_topic_suffix_case_insensitive),
-        ("strips_topic_suffix_with_extra_spaces", test_strips_topic_suffix_with_extra_spaces),
-        ("does_not_strip_non_topic_suffix", test_does_not_strip_non_topic_suffix),
-        ("strips_topic_with_band_name", test_strips_topic_with_band_name),
-        ("splits_title_slash_artist", test_splits_title_slash_artist),
-        ("splits_title_slash_and_topic", test_splits_title_slash_and_topic),
-        ("does_not_split_on_slash_without_spaces", test_does_not_split_on_slash_without_spaces),
-        ("does_not_split_title_without_slash", test_does_not_split_title_without_slash),
-        ("empty_right_of_slash_not_used", test_empty_right_of_slash_not_used),
-        ("empty_left_of_slash_not_used", test_empty_left_of_slash_not_used),
-        ("video_word_right_of_slash_not_used_as_artist", test_video_word_right_of_slash_not_used_as_artist),
-        ("passthrough_when_no_patterns", test_passthrough_when_no_patterns),
-        ("empty_strings", test_empty_strings),
-        ("strips_site_suffixes_from_title", test_strips_site_suffixes_from_title),
-        ("strips_official_video_noise", test_strips_official_video_noise),
-        ("strips_lyric_video_noise_in_brackets", test_strips_lyric_video_noise_in_brackets),
-        ("keeps_musical_version_label", test_keeps_musical_version_label),
-        ("splits_browser_artist_title_when_artist_empty", test_splits_browser_artist_title_when_artist_empty),
-        ("strips_repeated_artist_prefix_when_artist_present", test_strips_repeated_artist_prefix_when_artist_present),
-        ("does_not_split_dash_title_when_artist_present", test_does_not_split_dash_title_when_artist_present),
-    ]
-    passed = 0
-    for name, fn in tests:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-            passed += 1
-        except Exception:
-            print(f"  FAIL  {name}")
-            traceback.print_exc()
-    print(f"\n{passed}/{len(tests)} passed")
+    assert enrich_missing_meta(base, [different_title])[1] is False
+    assert enrich_missing_meta(base, [different_duration])[1] is False
