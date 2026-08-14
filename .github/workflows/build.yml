@@ -39,9 +39,9 @@ jobs:
           python -m pip install "pip==26.1.1"
           python -m pip install -r requirements-dev-lock.txt
       - name: Compile check
-        run: python -m compileall -q src tests
+        run: python -m compileall -q src tests scripts/write_checksums.py
       - name: Ruff correctness checks
-        run: ruff check src tests
+        run: ruff check src tests scripts/write_checksums.py
       - name: Incremental type check
         run: mypy src/lyrics/lrc_parser.py src/meta_utils.py src/ui/color_utils.py
       - name: Unit and offscreen Qt tests
@@ -65,9 +65,9 @@ jobs:
           python -m pip install "pip==26.1.1"
           python -m pip install -r requirements-dev-lock.txt
       - name: Compile check
-        run: python -m compileall -q src tests
+        run: python -m compileall -q src tests scripts/write_checksums.py
       - name: Ruff correctness checks
-        run: ruff check src tests
+        run: ruff check src tests scripts/write_checksums.py
       - name: Unit tests
         env:
           QT_QPA_PLATFORM: offscreen
@@ -87,6 +87,8 @@ jobs:
             libegl1 libopengl0 libxcb-cursor0
       - name: Build locked package
         run: bash scripts/build_linux.sh
+      - name: Verify package checksums
+        run: python3 scripts/write_checksums.py verify dist/Lyricaod
       - name: Smoke-test packaged executable
         env:
           QT_QPA_PLATFORM: offscreen
@@ -114,6 +116,8 @@ jobs:
       - name: Build locked package
         shell: pwsh
         run: .\scripts\build_windows.ps1
+      - name: Verify package checksums
+        run: python scripts/write_checksums.py verify dist/Lyricaod
       - name: Smoke-test packaged executable
         shell: pwsh
         env:
