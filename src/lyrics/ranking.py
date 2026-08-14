@@ -57,6 +57,21 @@ def text_similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def artist_similarity(left: str, right: str) -> float:
+    a = normalise_match_text(left)
+    b = normalise_match_text(right)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    sequence = SequenceMatcher(None, a, b).ratio()
+    left_tokens = set(a.split())
+    right_tokens = set(b.split())
+    union = left_tokens | right_tokens
+    token_overlap = len(left_tokens & right_tokens) / len(union) if union else 0.0
+    return sequence * 0.55 + token_overlap * 0.45
+
+
 def duration_similarity(query_ms: int, candidate_ms: int) -> float:
     if query_ms <= 0 or candidate_ms <= 0:
         return 0.5
@@ -70,7 +85,7 @@ def duration_similarity(query_ms: int, candidate_ms: int) -> float:
 
 def rank_candidate(query: TrackQuery, candidate: CandidateMetadata) -> RankedCandidate:
     title_sim = text_similarity(query.title, candidate.title)
-    artist_sim = text_similarity(query.artist, candidate.artist) if query.artist else 1.0
+    artist_sim = artist_similarity(query.artist, candidate.artist) if query.artist else 1.0
     album_sim = (
         text_similarity(query.album, candidate.album)
         if query.album and candidate.album
@@ -109,7 +124,7 @@ def rank_candidate(query: TrackQuery, candidate: CandidateMetadata) -> RankedCan
     ]
 
     acceptable = title_sim >= 0.62 and score >= 62.0
-    if query.artist and artist_sim < 0.38:
+    if query.artist and artist_sim < 0.58:
         acceptable = False
         reasons.append("artist-below-threshold")
     if query.duration_ms > 0 and candidate.duration_ms > 0 and duration_sim == 0.0:
