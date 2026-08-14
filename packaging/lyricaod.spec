@@ -8,6 +8,7 @@ from PyInstaller.utils.hooks import collect_submodules
 
 project_root = Path(SPECPATH).parent
 src_dir = project_root / "src"
+runtime_hook = project_root / "packaging" / "runtime_logging.py"
 
 hiddenimports = collect_submodules("websockets")
 hiddenimports += ["platformdirs"]
@@ -29,7 +30,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(runtime_hook)],
     excludes=excludes,
     noarchive=False,
     optimize=0,
