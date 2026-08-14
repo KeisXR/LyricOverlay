@@ -50,6 +50,10 @@ fi
 
 chmod +x "${PACKAGE_DIR}/Lyricaod"
 
+echo "==> Generating package checksums..."
+"${BUILD_VENV}/bin/python" "${PROJECT_DIR}/scripts/write_checksums.py" \
+    generate "${PACKAGE_DIR}"
+
 echo "==> Removing intermediate build files..."
 rm -rf "${PROJECT_DIR}/build" "${WORK_DIR}"
 
