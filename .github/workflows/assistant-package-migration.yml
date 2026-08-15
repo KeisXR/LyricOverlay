@@ -1,3 +1,4 @@
+# One-shot workflow: the final step removes this file after verification.
 name: Apply package migration
 
 on:
