@@ -6,6 +6,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import json
+import logging
 import os
 import platform
 import sqlite3
@@ -134,6 +135,16 @@ def format_diagnostics(data: dict) -> str:
     return json.dumps(data, indent=2, ensure_ascii=False, sort_keys=True)
 
 
+def _close_lyricaod_handlers() -> None:
+    root_logger = logging.getLogger("lyricaod")
+    for handler in list(root_logger.handlers):
+        try:
+            handler.flush()
+        finally:
+            handler.close()
+            root_logger.removeHandler(handler)
+
+
 def run_self_test() -> tuple[bool, list[str]]:
     """Exercise packaged imports and local storage without external services."""
     failures: list[str] = []
@@ -202,12 +213,16 @@ def run_self_test() -> tuple[bool, list[str]]:
                 log_dir=temporary / "logs", console=False
             )
             get_logger("self_test").info("self-test logging")
-            for handler in get_logger("self_test").handlers:
+            for handler in logging.getLogger("lyricaod").handlers:
                 handler.flush()
             if test_logging.log_file and not test_logging.log_file.exists():
                 failures.append("logging did not create the expected file")
         except Exception as exc:
             failures.append(f"logging initialization: {exc}")
+        finally:
+            # Windows prevents TemporaryDirectory cleanup while a
+            # RotatingFileHandler still owns the file.
+            _close_lyricaod_handlers()
 
     if failures:
         for failure in failures:
