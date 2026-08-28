@@ -2,8 +2,8 @@
 
 The module uses KDE's ``kreadconfig``/``kwriteconfig`` commands instead of
 parsing and serialising the user's entire ``kwinrulesrc`` file. Only the fixed
-Lyricaod-owned group is modified; unrelated rules and comments remain under
-KConfig's control.
+Lyricaod-owned group and groups an older Lyricaod wrote under a generated id
+are modified; unrelated rules and comments remain under KConfig's control.
 """
 
 from __future__ import annotations
@@ -68,6 +68,10 @@ def _write_value(
     )
 
 
+def _delete_group(writer: str, target: Path, group: str) -> None:
+    _run([writer, "--file", str(target), "--group", group, "--delete"])
+
+
 def _parse_rules(value: str) -> list[str]:
     rules: list[str] = []
     for rule in value.split(","):
@@ -75,6 +79,46 @@ def _parse_rules(value: str) -> list[str]:
         if stripped and stripped not in rules:
             rules.append(stripped)
     return rules
+
+
+def _legacy_rule_ids(reader: str, target: Path, rules: list[str]) -> list[str]:
+    """Find groups written by older Lyricaod versions under a generated id.
+
+    Only groups carrying Lyricaod's own ``Description`` are reported, so rules
+    the user wrote themselves are never captured.
+    """
+    candidates = list(rules)
+    if not candidates:
+        # Very old configs only track a numbered group count.
+        count = _read_value(reader, target, "General", "count")
+        if count.isdigit():
+            candidates = [str(index) for index in range(1, int(count) + 1)]
+
+    legacy: list[str] = []
+    for group in candidates:
+        if group == RULE_ID or group in legacy:
+            continue
+        try:
+            description = _read_value(reader, target, group, "Description")
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("Unable to inspect KWin rule %s: %s", group, exc)
+            continue
+        if description == RULE_DESCRIPTION:
+            legacy.append(group)
+    return legacy
+
+
+def _retire_legacy_rule(writer: str, target: Path, group: str) -> None:
+    """Disable, then best-effort delete, a rule an older Lyricaod created."""
+    try:
+        _write_value(writer, target, group, "Enabled", "false")
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Unable to disable stale KWin rule %s: %s", group, exc)
+        return
+    try:
+        _delete_group(writer, target, group)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("Stale KWin rule %s left disabled in place: %s", group, exc)
 
 
 def set_rule_enabled(
@@ -99,6 +143,15 @@ def set_rule_enabled(
 
         raw_rules = _read_value(reader, target, "General", "rules")
         rules = _parse_rules(raw_rules)
+
+        # Retire rules an older Lyricaod stored under a generated uuid, so the
+        # fixed id below stays the single source of truth for this setting.
+        legacy_ids = _legacy_rule_ids(reader, target, rules)
+        for legacy_id in legacy_ids:
+            _retire_legacy_rule(writer, target, legacy_id)
+        if legacy_ids:
+            rules = [rule for rule in rules if rule not in legacy_ids]
+
         if RULE_ID not in rules:
             rules.append(RULE_ID)
 

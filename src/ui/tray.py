@@ -69,6 +69,13 @@ class TrayIcon(QSystemTrayIcon):
     @classmethod
     def create(cls, app, parent=None):
         try:
+            # Qt happily constructs, paints and shows a tray icon even when no
+            # StatusNotifier host exists; absence is only reported here.
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                logger.warning(
+                    "No system tray is available; using visible fallback"
+                )
+                return TraylessFallback(app)
             tray = cls(app, parent)
             tray.setIcon(_make_icon())
             tray.setToolTip("Lyricaod")
@@ -79,6 +86,12 @@ class TrayIcon(QSystemTrayIcon):
                 tray._update_player_menu_checks
             )
             tray.show()
+            if not QSystemTrayIcon.isSystemTrayAvailable() or not tray.isVisible():
+                logger.warning(
+                    "System tray icon never became visible; using visible fallback"
+                )
+                tray.hide()
+                return TraylessFallback(app)
             tray._rebuild_player_menu(tray._app.mpris.get_players())
             return tray
         except Exception:
