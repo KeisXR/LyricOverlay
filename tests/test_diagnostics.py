@@ -42,6 +42,32 @@ def test_self_test_succeeds_without_real_media_backend(monkeypatch):
     assert failures == []
 
 
+def test_self_test_failure_report_reaches_captured_stderr(
+    tmp_path, monkeypatch, capsys
+):
+    # Once the temporary log handlers are closed a handler-less logger falls
+    # back to logging.lastResort, whose stream is the packaged capture stream
+    # feeding this same logger; the failure report has to escape that loop.
+    logging_setup.configure_logging(log_dir=tmp_path / "logs", console=False)
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    try:
+        logging_setup.capture_legacy_prints()
+        diagnostics._close_lyricaod_handlers()
+        diagnostics.logger.error("Self-test failure: %s", "import websockets")
+        print("- import websockets", file=sys.stderr)
+        sys.stderr.flush()
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        logging_setup.configure_logging(log_dir=tmp_path / "logs", console=False)
+
+    report = capsys.readouterr().err
+    assert "Self-test failure: import websockets" in report
+    assert "- import websockets" in report
+
+
 def test_main_self_test_exit_codes(monkeypatch, tmp_path):
     import main
 

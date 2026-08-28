@@ -14,7 +14,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-from logging_setup import LoggingState, configure_logging, default_log_dir, get_logger
+from logging_setup import (
+    LoggingState,
+    configure_logging,
+    console_stream,
+    default_log_dir,
+    get_logger,
+)
 
 
 logger = get_logger(__name__)
@@ -136,6 +142,13 @@ def format_diagnostics(data: dict) -> str:
 
 
 def _close_lyricaod_handlers() -> None:
+    """Release the log file and leave a recursion-safe fallback behind.
+
+    A logger without handlers falls back to ``logging.lastResort``, which
+    writes to ``sys.stderr`` — the very ``LoggingStream`` packaged builds
+    install — so the self-test failure report would recurse instead of being
+    printed. Install a handler on the real console stream instead.
+    """
     root_logger = logging.getLogger("lyricaod")
     for handler in list(root_logger.handlers):
         try:
@@ -143,6 +156,13 @@ def _close_lyricaod_handlers() -> None:
         finally:
             handler.close()
             root_logger.removeHandler(handler)
+    stream = console_stream()
+    if stream is None:
+        root_logger.addHandler(logging.NullHandler())
+        return
+    fallback = logging.StreamHandler(stream)
+    fallback.setLevel(logging.WARNING)
+    root_logger.addHandler(fallback)
 
 
 def run_self_test() -> tuple[bool, list[str]]:
