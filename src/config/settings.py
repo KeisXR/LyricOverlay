@@ -227,6 +227,7 @@ class Settings(QObject):
         self._file = self._config_dir / "settings.json"
         self._writing = False
         self._dirty = False
+        self._reload_deferred = False
         self._last_error = ""
         self._data = self._load_from_disk(fallback=_deep_copy_defaults())
 
@@ -285,6 +286,14 @@ class Settings(QObject):
     def _reload_from_disk(self):
         self._ensure_watch_paths()
         if not self._file.exists():
+            return
+
+        if self._dirty or self._save_timer.isActive():
+            # A local change is still waiting to be written. The watcher event
+            # that scheduled this reload is our own earlier write, so the disk
+            # is stale and adopting it would roll the pending change back.
+            # Retry once the scheduled save has landed.
+            self._reload_deferred = True
             return
 
         previous = self._data
@@ -351,6 +360,10 @@ class Settings(QObject):
             self._watcher.blockSignals(False)
             self._writing = False
             self._ensure_watch_paths()
+
+        if self._reload_deferred:
+            self._reload_deferred = False
+            self._reload_timer.start()
 
         self.changed.emit()
         return True

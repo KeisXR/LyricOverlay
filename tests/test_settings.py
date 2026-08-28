@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
 import sys
 import types
 from pathlib import Path
+
+
+@contextlib.contextmanager
+def _stubbed_modules(modules):
+    """Install ``modules`` in ``sys.modules`` and restore the originals after."""
+    missing = object()
+    saved = {name: sys.modules.get(name, missing) for name in modules}
+    sys.modules.update(modules)
+    try:
+        yield
+    finally:
+        for name, previous in saved.items():
+            if previous is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
 
 class _SignalInstance:
@@ -46,6 +63,7 @@ class _Timer:
         self.timeout = _SignalInstance()
         self.start_count = 0
         self.stopped = False
+        self.active = False
 
     def setSingleShot(self, _value):
         pass
@@ -55,9 +73,19 @@ class _Timer:
 
     def start(self):
         self.start_count += 1
+        self.active = True
 
     def stop(self):
         self.stopped = True
+        self.active = False
+
+    def isActive(self):
+        return self.active
+
+    def fire(self):
+        """Deliver a pending single-shot timeout, as the event loop would."""
+        self.active = False
+        self.timeout.emit()
 
 
 class _Watcher:
@@ -93,14 +121,19 @@ qtcore.QTimer = _Timer
 qtcore.Signal = _signal
 pyside = types.ModuleType("PySide6")
 pyside.QtCore = qtcore
-sys.modules.update({"PySide6": pyside, "PySide6.QtCore": qtcore})
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "src" / "config" / "settings.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MODULE_PATH = REPO_ROOT / "src" / "config" / "settings.py"
 spec = importlib.util.spec_from_file_location("settings_under_test", MODULE_PATH)
-settings_module = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
-sys.modules[spec.name] = settings_module
-spec.loader.exec_module(settings_module)
+settings_module = importlib.util.module_from_spec(spec)
+
+# The stubs must not outlive the import: leaking them replaces the real PySide6
+# for every test module collected afterwards.
+with _stubbed_modules(
+    {"PySide6": pyside, "PySide6.QtCore": qtcore, spec.name: settings_module}
+):
+    spec.loader.exec_module(settings_module)
 
 
 def _write(path, value):
@@ -199,6 +232,81 @@ def test_replaced_file_is_readded_to_watcher(tmp_path):
     settings._ensure_watch_paths()
 
     assert str(tmp_path / "settings.json") in settings._watcher.files()
+
+
+def test_quit_flushes_pending_debounced_change_to_disk(tmp_path):
+    settings = settings_module.Settings(config_dir=tmp_path)
+    about_to_quit = _SignalInstance()
+    about_to_quit.connect(settings.flush)
+
+    settings.set("behavior.hide_delay_ms", 1234)
+    pending = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert pending["behavior"]["hide_delay_ms"] == 2000
+
+    about_to_quit.emit()
+
+    saved = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert saved["behavior"]["hide_delay_ms"] == 1234
+    assert settings._save_timer.stopped
+
+
+def test_main_connects_settings_flush_to_about_to_quit():
+    source = (REPO_ROOT / "src" / "main.py").read_text(encoding="utf-8")
+
+    assert "aboutToQuit.connect(self.mpris.stop)" in source
+    assert "aboutToQuit.connect(self.settings.flush)" in source
+
+
+def test_self_write_reload_does_not_roll_back_a_pending_change(tmp_path):
+    settings = settings_module.Settings(config_dir=tmp_path)
+    events = []
+    settings.value_changed.connect(lambda key, value: events.append((key, value)))
+
+    # (1) A change is written to disk by the debounced save.
+    settings.set("window.font_size", 30)
+    settings._save_timer.fire()
+    assert not settings._dirty
+
+    # (2) The watcher event for our own write arrives afterwards.
+    settings._watcher.fileChanged.emit(str(tmp_path / "settings.json"))
+    assert settings._reload_timer.isActive()
+
+    # (3) The user changes another value inside the reload window.
+    settings.set("window.visible_lines", 9)
+    events.clear()
+
+    # (4) The reload must not adopt the (stale) disk contents.
+    settings._reload_timer.fire()
+
+    assert settings.get("window.visible_lines") == 9
+    assert settings.get("window.font_size") == 30
+    assert events == []
+
+    # (5) The pending change still reaches disk instead of a rolled-back value.
+    settings._save_timer.fire()
+    saved = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert saved["window"]["visible_lines"] == 9
+
+    # The deferred reload is re-armed and is a no-op now that disk == memory.
+    assert settings._reload_timer.isActive()
+    settings._reload_timer.fire()
+    assert settings.get("window.visible_lines") == 9
+    assert events == []
+
+
+def test_external_change_still_reloads_once_no_save_is_pending(tmp_path):
+    settings = settings_module.Settings(config_dir=tmp_path)
+    events = []
+    settings.value_changed.connect(lambda key, value: events.append((key, value)))
+    data = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    data["window"]["font_size"] = 48
+    _write(tmp_path / "settings.json", data)
+
+    settings._watcher.fileChanged.emit(str(tmp_path / "settings.json"))
+    settings._reload_timer.fire()
+
+    assert settings.get("window.font_size") == 48
+    assert ("window.font_size", 48) in events
 
 
 def test_nullable_position_and_pin_are_normalised(tmp_path):

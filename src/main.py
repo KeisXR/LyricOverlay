@@ -212,6 +212,8 @@ class Application:
         )
         self.mpris = UnifiedPlayerListener(player_listener, browser, None)
         self._qapp.aboutToQuit.connect(self.mpris.stop)
+        # Settings are saved debounced; write any pending change before exit.
+        self._qapp.aboutToQuit.connect(self.settings.flush)
         pinned_player = self.settings.get("behavior.pinned_player")
         if pinned_player:
             self.mpris.pin_player(pinned_player)
