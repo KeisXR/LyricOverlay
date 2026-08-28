@@ -8,6 +8,7 @@ The window:
   - Shows a slight dark tint + control buttons on mouse hover
   - Dynamically shrinks to fit the displayed text (Wayland-friendly)
   - Optional semi-transparent background behind text for readability
+  - Never takes keyboard focus, so plain lyrics are scrolled with the mouse wheel
 """
 
 from PySide6.QtCore import (
@@ -29,6 +30,8 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QMoveEvent,
+    QWheelEvent,
+    QGuiApplication,
 )
 from PySide6.QtWidgets import QWidget, QMenu
 
@@ -58,6 +61,7 @@ class OverlayWindow(QWidget):
         self._current_word_index = -1
         self._current_word_progress = 0.0
         self._current_position_ms = 0
+        self._plain_scroll_start = 0
 
         # Loading state
         self._loading = False
@@ -76,6 +80,12 @@ class OverlayWindow(QWidget):
         self._controls_opacity = 0.0
         self._close_btn_rect = QRect()
         self._resync_btn_rect = QRect()
+
+        # Reused animations (avoid creating unbounded QObject children)
+        self._opacity_anim = QPropertyAnimation(self, b"controls_opacity", parent=self)
+        self._line_anim = QPropertyAnimation(self, b"line_transition", parent=self)
+        self._line_anim.setDuration(260)
+        self._line_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
         self._setup_window()
         self._setup_hide_timer()
@@ -149,19 +159,16 @@ class OverlayWindow(QWidget):
     )
 
     def _animate_controls_opacity(self, target: float):
-        # Keep as instance attr so Python doesn't GC the animation mid-flight
-        self._opacity_anim = QPropertyAnimation(self, b"controls_opacity", parent=self)
+        self._opacity_anim.stop()
         self._opacity_anim.setDuration(200)
         self._opacity_anim.setStartValue(self._controls_opacity)
         self._opacity_anim.setEndValue(target)
         self._opacity_anim.start()
 
     def _animate_line_transition(self):
-        self._line_anim = QPropertyAnimation(self, b"line_transition", parent=self)
-        self._line_anim.setDuration(260)
+        self._line_anim.stop()
         self._line_anim.setStartValue(0.0)
         self._line_anim.setEndValue(1.0)
-        self._line_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._line_anim.start()
 
     # ------------------------------------------------------------------
@@ -203,6 +210,27 @@ class OverlayWindow(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         pass
+
+    def wheelEvent(self, event: QWheelEvent):
+        """Scroll plain (unsynced) lyrics one line at a time."""
+        # The overlay is deliberately never the active window
+        # (WindowDoesNotAcceptFocus + WA_ShowWithoutActivating), so Qt never
+        # delivers key events to it. The wheel is the only navigation input
+        # that works here; a keyPressEvent override would never be called.
+        if self._synced or self._loading or not self._display_lines:
+            super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y() or event.pixelDelta().y()
+        if delta == 0:
+            super().wheelEvent(event)
+            return
+        step = -1 if delta > 0 else 1
+        max_start = self._max_start_index(self._visible_line_count())
+        next_start = max(0, min(max_start, self._plain_scroll_start + step))
+        if next_start != self._plain_scroll_start:
+            self._plain_scroll_start = next_start
+            self.update()
+        event.accept()
 
     def moveEvent(self, event: QMoveEvent):
         """Debounce: save position after the user finishes dragging."""
@@ -251,6 +279,7 @@ class OverlayWindow(QWidget):
             self.move(int(x), int(y))
 
     def set_lyrics_data(self, lrc: ParsedLRC, synced: bool = True):
+        self._clear_control_hit_rects()
         self._parsed_lrc = lrc
         self._synced = synced
         self._display_lines = [ln.text for ln in lrc.lines] if lrc.lines else []
@@ -260,10 +289,12 @@ class OverlayWindow(QWidget):
         self._current_word_index = -1
         self._current_word_progress = 0.0
         self._current_position_ms = 0
-        self._shrink_to_content()
+        self._plain_scroll_start = 0
+        self.refresh_layout()
         self.update()
 
     def set_plain_text(self, text: str):
+        self._clear_control_hit_rects()
         self._synced = False
         self._parsed_lrc = None
         self._display_lines = [
@@ -275,7 +306,8 @@ class OverlayWindow(QWidget):
         self._current_word_index = -1
         self._current_word_progress = 0.0
         self._current_position_ms = 0
-        self._shrink_to_content()
+        self._plain_scroll_start = 0
+        self.refresh_layout()
         self.update()
 
     def set_position(self, position_ms: int):
@@ -292,20 +324,35 @@ class OverlayWindow(QWidget):
                 self._animate_line_transition()
             else:
                 self._line_transition = 1.0
-        self._update_word_progress(now_ms)
-        self.update()
+            line_changed = True
+        else:
+            line_changed = False
+        word_changed = self._update_word_progress(now_ms)
+        if line_changed or word_changed:
+            self.update()
 
     def _update_word_progress(self, position_ms: int):
-        self._current_word_index = -1
-        self._current_word_progress = 0.0
+        prev_idx = self._current_word_index
+        prev_progress = self._current_word_progress
+        next_idx = -1
+        next_progress = 0.0
         if not self._settings.get("window.karaoke_enabled", True):
-            return
+            changed = (next_idx != prev_idx) or (next_progress != prev_progress)
+            self._current_word_index = next_idx
+            self._current_word_progress = next_progress
+            return changed
         if self._current_line < 0 or not self._parsed_lrc:
-            return
+            changed = (next_idx != prev_idx) or (next_progress != prev_progress)
+            self._current_word_index = next_idx
+            self._current_word_progress = next_progress
+            return changed
         line = self._parsed_lrc.lines[self._current_line]
         words = line.words or []
         if not words:
-            return
+            changed = (next_idx != prev_idx) or (next_progress != prev_progress)
+            self._current_word_index = next_idx
+            self._current_word_progress = next_progress
+            return changed
 
         idx = -1
         for i, word in enumerate(words):
@@ -315,17 +362,27 @@ class OverlayWindow(QWidget):
                 break
 
         if idx < 0:
-            return
-        self._current_word_index = idx
+            changed = (next_idx != prev_idx) or (next_progress != prev_progress)
+            self._current_word_index = next_idx
+            self._current_word_progress = next_progress
+            return changed
+        next_idx = idx
         cur_ts = words[idx].timestamp_ms
         if idx + 1 < len(words):
             nxt = words[idx + 1].timestamp_ms
         elif self._current_line + 1 < len(self._parsed_lrc.lines):
             nxt = self._parsed_lrc.lines[self._current_line + 1].timestamp_ms
         else:
-            nxt = max(cur_ts + 1, line.timestamp_ms + 1000)
+            if idx > 0:
+                last_gap = max(150, cur_ts - words[idx - 1].timestamp_ms)
+            else:
+                last_gap = max(300, cur_ts - line.timestamp_ms)
+            nxt = cur_ts + max(600, min(4000, last_gap * 2))
         span = max(1, nxt - cur_ts)
-        self._current_word_progress = max(0.0, min(1.0, (position_ms - cur_ts) / span))
+        next_progress = max(0.0, min(1.0, (position_ms - cur_ts) / span))
+        self._current_word_index = next_idx
+        self._current_word_progress = next_progress
+        return (next_idx != prev_idx) or (next_progress != prev_progress)
 
     def _draw_karaoke_line(self, painter: QPainter, fm: QFontMetrics, x: int, y: int, text: str, words, highlight_color: QColor):
         full_w = fm.horizontalAdvance(text)
@@ -370,14 +427,60 @@ class OverlayWindow(QWidget):
         self.update()
 
     def set_loading(self, loading: bool):
+        if loading:
+            self._clear_control_hit_rects()
+        prev_seekbar_visible = self._should_show_seekbar()
         self._loading = loading
-        self._shrink_to_content()
+        if prev_seekbar_visible != self._should_show_seekbar():
+            self.refresh_layout()
+        else:
+            self._shrink_to_content()
         self.update()
 
     def set_seek(self, position_ms: int, length_ms: int):
+        prev_seekbar_visible = self._should_show_seekbar()
         self._seek_position = position_ms
         self._seek_length = max(0, length_ms)
+        if prev_seekbar_visible != self._should_show_seekbar():
+            self.refresh_layout()
         self.update()
+
+    def update_seek_position(self, position_ms: int):
+        self.set_seek(position_ms, self._seek_length)
+
+    def show_alternatives_menu(self):
+        self._show_alternatives_menu()
+
+    def refresh_layout(self):
+        self._shrink_to_content()
+
+    def _visible_line_count(self) -> int:
+        return max(
+            1,
+            min(
+                len(self._display_lines),
+                self._settings.get("window.visible_lines", 5),
+            ),
+        )
+
+    def _max_start_index(self, visible: int) -> int:
+        return max(0, len(self._display_lines) - visible)
+
+    def _clamped_window_start(self, center_line: int, visible: int) -> int:
+        start = max(0, center_line - visible // 2)
+        return min(start, self._max_start_index(visible))
+
+    def _should_show_seekbar(self) -> bool:
+        return (
+            self._settings.get("window.show_seekbar", True)
+            and self._seek_length > 0
+            and not self._loading
+        )
+
+    def _clear_control_hit_rects(self):
+        self._close_btn_rect = QRect()
+        self._resync_btn_rect = QRect()
+        self._alt_menu_rect = QRect()
 
     # ------------------------------------------------------------------
     #  Dynamic sizing
@@ -386,15 +489,27 @@ class OverlayWindow(QWidget):
     def _shrink_to_content(self):
         font = self._make_font()
         fm = QFontMetrics(font)
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        available_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        max_width_from_settings = int(
+            available_geo.width() * self._settings.get("window.width_pct", 60) / 100
+        )
+        max_width = min(
+            available_geo.width(),
+            max(self.minimumWidth(), max_width_from_settings),
+        )
+        max_height = min(
+            available_geo.height(),
+            max(self.minimumHeight(), int(self._settings.get("window.height_px", 300))),
+        )
 
         if not self._display_lines:
-            self.resize(300, 60)
+            empty_w = min(max_width, max(self.minimumWidth(), 300))
+            empty_h = min(max_height, max(self.minimumHeight(), 60))
+            self.resize(empty_w, empty_h)
             return
 
-        visible = min(
-            len(self._display_lines),
-            self._settings.get("window.visible_lines", 5),
-        )
+        visible = self._visible_line_count()
         max_w = max(
             (fm.horizontalAdvance(ln) for ln in self._display_lines if ln),
             default=100,
@@ -402,8 +517,13 @@ class OverlayWindow(QWidget):
         line_h = fm.lineSpacing()
         pad = 60
         old_geo = self.geometry()
-        seekbar_h = 20 if self._settings.get("window.show_seekbar", True) and self._seek_length > 0 else 0
-        self.resize(max_w + pad * 2, line_h * max(1, visible) + pad + seekbar_h)
+        seekbar_h = 20 if self._should_show_seekbar() else 0
+        target_w = min(max_width, max(self.minimumWidth(), max_w + pad * 2))
+        target_h = min(
+            max_height,
+            max(self.minimumHeight(), line_h * max(1, visible) + pad + seekbar_h),
+        )
+        self.resize(target_w, target_h)
         # Preserve top-left corner after resize (X11 only)
         if not self.is_wayland():
             self.move(old_geo.x(), old_geo.y())
@@ -426,7 +546,6 @@ class OverlayWindow(QWidget):
 
         # --- Background ---
         use_bg = self._settings.get("window.background_enabled", False)
-        hint_alpha = 0.15  # low-opacity hint for alternatives indicator
 
         if use_bg:
             bg_color = color_from_setting(
@@ -464,13 +583,11 @@ class OverlayWindow(QWidget):
             self._settings.get("window.highlight_color", "#ffcc00"), "#ffcc00"
         )
 
-        visible = min(
-            len(self._display_lines),
-            self._settings.get("window.visible_lines", 5),
-        )
+        visible = self._visible_line_count()
 
         # --- Loading indicator ---
         if self._loading:
+            self._clear_control_hit_rects()
             painter.setPen(QPen(text_color))
             load_font = QFont(font)
             load_font.setPixelSize(max(14, font.pixelSize() // 2))
@@ -484,19 +601,24 @@ class OverlayWindow(QWidget):
             return
 
         if visible == 0:
+            self._clear_control_hit_rects()
             painter.end()
             return
 
         if self._synced and self._current_line >= 0:
-            current_start = max(0, self._current_line - visible // 2)
+            current_start = self._clamped_window_start(self._current_line, visible)
             if self._previous_line >= 0:
-                previous_start = max(0, self._previous_line - visible // 2)
+                previous_start = self._clamped_window_start(self._previous_line, visible)
             else:
                 previous_start = current_start
             start_float = previous_start + (current_start - previous_start) * self._line_transition
         else:
-            current_start = 0
-            start_float = 0.0
+            current_start = (
+                max(0, min(self._max_start_index(visible), self._plain_scroll_start))
+                if not self._synced
+                else 0
+            )
+            start_float = float(current_start)
 
         first_line = max(0, int(start_float) - 1)
         last_line = min(len(self._display_lines), int(start_float) + visible + 2)
