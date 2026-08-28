@@ -1,0 +1,50 @@
+# One-shot workflow: the final step removes this file after verification.
+name: Apply package migration
+
+on:
+  push:
+    branches:
+      - assistant/python-package-v2
+
+permissions:
+  contents: write
+
+jobs:
+  migrate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libdbus-1-dev libglib2.0-dev pkg-config \
+            libegl1 libopengl0 libxcb-cursor0
+      - name: Apply migration
+        run: python scripts/assistant_package_migration.py
+      - name: Install and verify migrated package
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pip install "pip==26.1.1"
+          python -m pip install -r requirements-dev.lock
+          python -m pip install --no-deps --editable .
+          python -m compileall -q src tests
+          ruff check src tests
+          pytest -q
+          python -m lyricaod --help >/dev/null
+          lyricaod --help >/dev/null
+      - name: Commit migration
+        run: |
+          git rm scripts/assistant_package_migration.py .github/workflows/assistant-package-migration.yml
+          git config user.name "OpenAI Assistant"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "refactor: establish the lyricaod Python package"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
