@@ -47,6 +47,7 @@ class UnifiedPlayerListener(QObject):
         self._active_player = ""
         self._mpris_active = ""
         self._browser_active = ""
+        self._browser_media_active = False
 
         self._mpris.metadata_changed.connect(self._filter_metadata)
         self._mpris.position_changed.connect(self._filter_position)
@@ -64,6 +65,10 @@ class UnifiedPlayerListener(QObject):
             self._browser_ws.active_player_changed.connect(
                 lambda player_id: self._set_backend_active("browser", player_id)
             )
+            if hasattr(self._browser_ws, "media_active_changed"):
+                self._browser_ws.media_active_changed.connect(
+                    self._set_browser_media_active
+                )
 
         self._update_players()
 
@@ -83,11 +88,17 @@ class UnifiedPlayerListener(QObject):
         self.players_changed.emit(players)
         self._choose_active_player()
 
+    def _set_browser_media_active(self, active: bool):
+        self._browser_media_active = bool(active)
+        if not self._browser_media_active:
+            self._browser_active = ""
+        self._choose_active_player()
+
     def _choose_active_player(self):
         players = self.get_players()
         if self._pinned_player and self._pinned_player in players:
             active = self._pinned_player
-        elif self._browser_active:
+        elif self._browser_media_active and self._browser_active:
             active = self._browser_active
         elif self._mpris_active:
             active = self._mpris_active
