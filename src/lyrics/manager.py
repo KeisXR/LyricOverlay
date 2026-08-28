@@ -204,10 +204,14 @@ class LyricsManager(QObject):
         return self._cache.canonical_key(artist, title, album, duration_ms)
 
     def _aliases(self, artist: str, title: str, trackid: str) -> tuple[str, ...]:
-        aliases = [self._legacy_key(artist, title, trackid)]
-        if trackid and trackid != "/":
-            aliases.append(trackid)
-        return tuple(aliases)
+        """Return cache aliases that cannot collide across different tracks.
+
+        Only the v2 key is aliased so migrated entries stay reachable. The bare
+        trackid is deliberately excluded: players report constant identifiers
+        ("browser-ws", an SMTC AUMID, a reused MPRIS path), so aliasing it would
+        map every track to whichever entry was written last.
+        """
+        return (self._legacy_key(artist, title, trackid),)
 
     @staticmethod
     def _candidate_id(data: LyricsData) -> str:
@@ -313,6 +317,24 @@ class LyricsManager(QObject):
             item for index, item in enumerate(candidates) if index != selected_index
         ]
         return LyricsResult(primary, alternatives)
+
+    @classmethod
+    def _merge_refreshed_primary(
+        cls, cached: LyricsResult, primary: LyricsData
+    ) -> LyricsResult:
+        """Fold a refreshed primary into a cached set, keeping its selection."""
+        primary = cls._ensure_candidate_id(primary)
+        selected = cls._ensure_candidate_id(cached.primary)
+        if primary.candidate_id == selected.candidate_id:
+            return LyricsResult(primary, list(cached.alternatives))
+        merged: list[LyricsData] = []
+        seen = {selected.candidate_id}
+        for item in [*cached.alternatives, primary]:
+            item = cls._ensure_candidate_id(item)
+            if item.candidate_id not in seen:
+                seen.add(item.candidate_id)
+                merged.append(item)
+        return LyricsResult(selected, merged)
 
     def _load_record(
         self, key: str, aliases: tuple[str, ...]
@@ -575,8 +597,12 @@ class LyricsManager(QObject):
             if source == "syncedlyrics"
             else self._convert_lrclib_result(payload)
         )
-        result = LyricsResult(primary, [])
-        self._put_cache(key, primary, [], aliases)
+        result = (
+            self._merge_refreshed_primary(cached_result, primary)
+            if cached_result is not None
+            else LyricsResult(primary, [])
+        )
+        self._put_cache(key, result.primary, result.alternatives, aliases)
         self._adopt_result(key, aliases, result)
         self.lyrics_ready.emit(result)
 
