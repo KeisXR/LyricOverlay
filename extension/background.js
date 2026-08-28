@@ -104,26 +104,44 @@ function chooseSource(now = Date.now()) {
   return best;
 }
 
-function makePayload(record, stateOverride = null) {
+// A stored state is republished on the liveness interval, so its position is
+// already up to a heartbeat old. Age it forward instead of shipping the value
+// verbatim: the app reads a stale position as a backwards seek and re-anchors.
+function agedState(record, now) {
+  const state = record.state;
+  if (!state || state.status !== 'Playing') return state;
+  const elapsedMs = now - record.observedAt;
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return state;
+
+  const rate = Number.isFinite(state.rate) && state.rate > 0 ? state.rate : 1.0;
+  const base = Number.isFinite(state.position) ? state.position : 0;
+  let position = base + (elapsedMs / 1000) * rate;
+  if (Number.isFinite(state.duration) && state.duration > 0) {
+    position = Math.min(position, state.duration);
+  }
+  return { ...state, position: Math.max(0, position) };
+}
+
+function makePayload(record, stateOverride = null, now = Date.now()) {
   outboundSequence += 1;
   return {
     protocol_version: PROTOCOL_VERSION,
     sequence: outboundSequence,
-    observed_at_ms: record.observedAt,
+    observed_at_ms: now,
     source: {
       instance_id: instanceId,
       tab_id: record.tabId,
       frame_id: record.frameId,
     },
-    state: stateOverride || record.state,
+    state: stateOverride || agedState(record, now),
   };
 }
 
-function publishSelection() {
-  const next = chooseSource();
+function publishSelection(now = Date.now()) {
+  const next = chooseSource(now);
   if (next) {
     selectedSourceKey = next.key;
-    sendPayload(makePayload(next));
+    sendPayload(makePayload(next, null, now));
     return;
   }
 
@@ -137,10 +155,10 @@ function publishSelection() {
       position: 0,
       duration: 0,
       rate: 1.0,
-    }));
+    }, now));
   } else if (latestPayload && latestPayload.source) {
     const previous = {
-      observedAt: Date.now(),
+      observedAt: now,
       tabId: latestPayload.source.tab_id,
       frameId: latestPayload.source.frame_id,
     };
@@ -152,7 +170,7 @@ function publishSelection() {
       position: 0,
       duration: 0,
       rate: 1.0,
-    }));
+    }, now));
   }
   selectedSourceKey = null;
 }
@@ -252,7 +270,7 @@ setInterval(() => {
       changed = true;
     }
   }
-  if (changed || selectedSourceKey) publishSelection();
+  if (changed || selectedSourceKey) publishSelection(now);
 }, 2000);
 
 loadPort().finally(connect);

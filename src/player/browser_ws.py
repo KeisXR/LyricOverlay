@@ -8,6 +8,7 @@ separate: an idle extension must never pre-empt MPRIS or SMTC playback.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import time
@@ -104,6 +105,9 @@ class BrowserWsListener(QObject):
     _MAX_MEDIA_SEC = 2 * 24 * 60 * 60
     _MAX_RATE = 16.0
     _SEEK_THRESHOLD_MS = 750
+    _SCORE_PLAYING = 1000.0
+    _SCORE_PAUSED = 500.0
+    _SCORE_OWNER = 100.0
 
     def __init__(
         self,
@@ -126,8 +130,8 @@ class BrowserWsListener(QObject):
         self._connected = False
         self._connection_count = 0
         self._media_active = False
-        self._last_state_time = 0.0
         self._active_source_key = ""
+        self._sources: dict[str, dict] = {}
         self._last_sequence_by_source: dict[str, int] = {}
 
         self._position_ms = 0
@@ -179,20 +183,97 @@ class BrowserWsListener(QObject):
         self._last_sequence_by_source[source_key] = sequence
 
         now = self._clock()
-        self._last_state_time = now
+        self._prune_stale_sources(now)
 
         title = payload["title"]
-        artist = payload["artist"]
-        album = payload["album"]
         status = payload["status"]
-        position_ms = round(payload["position"] * 1000)
-        length_ms = round(payload["duration"] * 1000)
-        rate = payload["rate"]
         candidate = bool(title) and status in {"Playing", "Paused"}
 
         if not candidate:
-            self._deactivate_media()
+            # Only the source that owns the active media may release it: an
+            # idle second browser must not stop what another one is playing.
+            self._sources.pop(source_key, None)
+            if source_key == self._active_source_key:
+                self._promote_best_source(now)
             return True
+
+        self._sources[source_key] = {
+            "title": title,
+            "artist": payload["artist"],
+            "album": payload["album"],
+            "status": status,
+            "position_ms": round(payload["position"] * 1000),
+            "length_ms": round(payload["duration"] * 1000),
+            "rate": payload["rate"],
+            "updated_at": now,
+        }
+
+        best_key = self._select_source_key(now)
+        if best_key is not None and (
+            best_key == source_key or best_key != self._active_source_key
+        ):
+            self._adopt_source(best_key, now)
+        return True
+
+    def _source_score(self, source_key: str, record: dict, now: float):
+        """Rank one source the way the extension ranks tabs within a browser."""
+        age = now - record["updated_at"]
+        if age > self._STALE_TIMEOUT_SEC:
+            return None
+        if record["status"] == "Playing":
+            score = self._SCORE_PLAYING
+        elif record["status"] == "Paused":
+            score = self._SCORE_PAUSED
+        else:
+            return None
+        # Hysteresis: the owning source keeps the media unless a higher
+        # priority source appears, otherwise two live browsers publishing at
+        # the same cadence would swap ownership on every heartbeat.
+        if source_key == self._active_source_key:
+            score += self._SCORE_OWNER
+        score += max(0.0, self._STALE_TIMEOUT_SEC - age)
+        return score
+
+    def _select_source_key(self, now: float) -> str | None:
+        best_key = None
+        best_score = None
+        for source_key, record in self._sources.items():
+            score = self._source_score(source_key, record, now)
+            if score is None:
+                continue
+            if best_score is None or score > best_score:
+                best_key = source_key
+                best_score = score
+        return best_key
+
+    def _prune_stale_sources(self, now: float):
+        for source_key in [
+            key
+            for key, record in self._sources.items()
+            if (now - record["updated_at"]) > self._STALE_TIMEOUT_SEC
+        ]:
+            del self._sources[source_key]
+
+    def _promote_best_source(self, now: float):
+        best_key = self._select_source_key(now)
+        if best_key is None:
+            self._deactivate_media()
+        else:
+            self._adopt_source(best_key, now)
+
+    def _adopt_source(self, source_key: str, now: float):
+        record = self._sources[source_key]
+        status = record["status"]
+        length_ms = record["length_ms"]
+        position_ms = record["position_ms"]
+        if status == "Playing":
+            # A record adopted after its own report carries an aged position;
+            # advance it instead of rewinding playback to where it was.
+            position_ms += round(
+                max(0.0, (now - record["updated_at"]) * 1000.0 * record["rate"])
+            )
+        if length_ms:
+            position_ms = min(position_ms, length_ms)
 
         old_status = self._status
         old_meta = self._current_meta
@@ -200,10 +281,10 @@ class BrowserWsListener(QObject):
         was_active = self._media_active
 
         new_meta = {
-            "title": title,
-            "artist": artist,
-            "album": album,
-            "trackid": f"browser-ws:{source_key}",
+            "title": record["title"],
+            "artist": record["artist"],
+            "album": record["album"],
+            "trackid": self._track_id(record["title"], record["artist"]),
             "length_ms": length_ms,
             "player_name": "browser-ws",
         }
@@ -216,7 +297,7 @@ class BrowserWsListener(QObject):
         self._update_timeline(
             now=now,
             position_ms=position_ms,
-            rate=rate,
+            rate=record["rate"],
             status=status,
             old_status=old_status,
             source_changed=source_changed,
@@ -230,7 +311,16 @@ class BrowserWsListener(QObject):
             self.playback_state_changed.emit(status, "browser-ws")
         if status == "Paused":
             self.position_changed.emit(position_ms)
-        return True
+
+    @staticmethod
+    def _track_id(title: str, artist: str) -> str:
+        """Return an identity that is stable for one track.
+
+        Service workers restart and tabs come and go constantly, so browser
+        instance/tab/frame identity must never reach the lyrics cache key.
+        """
+        raw = f"{artist}\x1f{title}".casefold().encode("utf-8")
+        return f"browser-ws:{hashlib.sha256(raw).hexdigest()[:16]}"
 
     def _update_timeline(
         self,
@@ -369,10 +459,10 @@ class BrowserWsListener(QObject):
         if not self._connected:
             self._deactivate_media()
             return
-        if self._last_state_time <= 0:
-            return
-        if (self._clock() - self._last_state_time) > self._STALE_TIMEOUT_SEC:
-            self._deactivate_media()
+        now = self._clock()
+        self._prune_stale_sources(now)
+        if self._active_source_key not in self._sources:
+            self._promote_best_source(now)
 
     def _tick_position(self):
         self._enforce_freshness()
@@ -412,6 +502,7 @@ class BrowserWsListener(QObject):
         self._position_time = 0.0
         self._last_reported_pos_ms = None
         self._active_source_key = ""
+        self._sources.clear()
         self._current_meta = {}
         self._status = "Stopped"
         self._set_media_active(False)
