@@ -8,6 +8,7 @@ The window:
   - Shows a slight dark tint + control buttons on mouse hover
   - Dynamically shrinks to fit the displayed text (Wayland-friendly)
   - Optional semi-transparent background behind text for readability
+  - Never takes keyboard focus, so plain lyrics are scrolled with the mouse wheel
 """
 
 from PySide6.QtCore import (
@@ -30,7 +31,6 @@ from PySide6.QtGui import (
     QPen,
     QMoveEvent,
     QWheelEvent,
-    QKeyEvent,
     QGuiApplication,
 )
 from PySide6.QtWidgets import QWidget, QMenu
@@ -212,6 +212,11 @@ class OverlayWindow(QWidget):
         pass
 
     def wheelEvent(self, event: QWheelEvent):
+        """Scroll plain (unsynced) lyrics one line at a time."""
+        # The overlay is deliberately never the active window
+        # (WindowDoesNotAcceptFocus + WA_ShowWithoutActivating), so Qt never
+        # delivers key events to it. The wheel is the only navigation input
+        # that works here; a keyPressEvent override would never be called.
         if self._synced or self._loading or not self._display_lines:
             super().wheelEvent(event)
             return
@@ -226,27 +231,6 @@ class OverlayWindow(QWidget):
             self._plain_scroll_start = next_start
             self.update()
         event.accept()
-
-    def keyPressEvent(self, event: QKeyEvent):
-        if not self._synced and self._display_lines and not self._loading:
-            visible = self._visible_line_count()
-            step = max(1, visible - 1)
-            max_start = self._max_start_index(visible)
-            if event.key() == Qt.Key.Key_PageDown:
-                next_start = min(max_start, self._plain_scroll_start + step)
-                if next_start != self._plain_scroll_start:
-                    self._plain_scroll_start = next_start
-                    self.update()
-                event.accept()
-                return
-            if event.key() == Qt.Key.Key_PageUp:
-                next_start = max(0, self._plain_scroll_start - step)
-                if next_start != self._plain_scroll_start:
-                    self._plain_scroll_start = next_start
-                    self.update()
-                event.accept()
-                return
-        super().keyPressEvent(event)
 
     def moveEvent(self, event: QMoveEvent):
         """Debounce: save position after the user finishes dragging."""

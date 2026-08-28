@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
+
+
+@contextlib.contextmanager
+def _stubbed_modules(modules):
+    """Install stub modules in ``sys.modules`` and restore it afterwards."""
+    missing = object()
+    saved = {name: sys.modules.get(name, missing) for name in modules}
+    sys.modules.update(modules)
+    try:
+        yield
+    finally:
+        for name, previous in saved.items():
+            if previous is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
 
 class _SignalInstance:
@@ -49,9 +66,6 @@ class _QWidget(_Dummy):
         self.updated = getattr(self, "updated", 0) + 1
 
     def wheelEvent(self, event):
-        pass
-
-    def keyPressEvent(self, event):
         pass
 
 
@@ -123,10 +137,6 @@ class _Qt:
     class MouseButton:
         LeftButton = 1
 
-    class Key:
-        Key_PageDown = 1
-        Key_PageUp = 2
-
     class WindowType:
         FramelessWindowHint = 1
         Tool = 2
@@ -169,7 +179,6 @@ for name in (
     "QPen",
     "QMoveEvent",
     "QWheelEvent",
-    "QKeyEvent",
     "QGuiApplication",
 ):
     setattr(qtgui, name, _Dummy)
@@ -180,14 +189,6 @@ pyside = types.ModuleType("PySide6")
 pyside.QtCore = qtcore
 pyside.QtGui = qtgui
 pyside.QtWidgets = qtwidgets
-sys.modules.update(
-    {
-        "PySide6": pyside,
-        "PySide6.QtCore": qtcore,
-        "PySide6.QtGui": qtgui,
-        "PySide6.QtWidgets": qtwidgets,
-    }
-)
 
 
 @dataclass
@@ -214,21 +215,33 @@ lyrics_module.find_current_line = lambda lrc, pos: max(
     [index for index, line in enumerate(lrc.lines) if line.timestamp_ms <= pos],
     default=-1,
 )
-sys.modules["lyrics"] = types.ModuleType("lyrics")
-sys.modules["lyrics.lrc_parser"] = lyrics_module
+lyrics_package = types.ModuleType("lyrics")
 ui_module = types.ModuleType("ui")
 ui_module.__path__ = []
-sys.modules["ui"] = ui_module
 color_module = types.ModuleType("ui.color_utils")
 color_module.color_from_setting = lambda *_args: None
-sys.modules["ui.color_utils"] = color_module
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "src" / "ui" / "overlay.py"
 spec = importlib.util.spec_from_file_location("overlay_under_test", MODULE_PATH)
 overlay_module = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
-sys.modules[spec.name] = overlay_module
-spec.loader.exec_module(overlay_module)
+
+# The stubs only need to exist while the module under test is executed; leaving
+# them in sys.modules would break the import of every other test module.
+with _stubbed_modules(
+    {
+        "PySide6": pyside,
+        "PySide6.QtCore": qtcore,
+        "PySide6.QtGui": qtgui,
+        "PySide6.QtWidgets": qtwidgets,
+        "lyrics": lyrics_package,
+        "lyrics.lrc_parser": lyrics_module,
+        "ui": ui_module,
+        "ui.color_utils": color_module,
+        spec.name: overlay_module,
+    }
+):
+    spec.loader.exec_module(overlay_module)
 
 
 class _Settings:
