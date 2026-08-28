@@ -44,6 +44,8 @@ jobs:
         run: ruff check src tests
       - name: Incremental type check
         run: mypy src/lyrics/lrc_parser.py src/meta_utils.py src/ui/color_utils.py
+      - name: Noninteractive diagnostics
+        run: python src/main.py --diagnose | python -m json.tool > /dev/null
       - name: Unit and offscreen Qt tests
         env:
           QT_QPA_PLATFORM: offscreen
@@ -68,13 +70,16 @@ jobs:
         run: python -m compileall -q src tests
       - name: Ruff correctness checks
         run: ruff check src tests
+      - name: Noninteractive diagnostics
+        shell: pwsh
+        run: python src/main.py --diagnose | python -m json.tool | Out-Null
       - name: Unit tests
         env:
           QT_QPA_PLATFORM: offscreen
         run: pytest -q
 
   linux-package:
-    name: Linux package and smoke test
+    name: Linux package and self-test
     needs: quality
     runs-on: ubuntu-24.04
     steps:
@@ -87,10 +92,10 @@ jobs:
             libegl1 libopengl0 libxcb-cursor0
       - name: Build locked package
         run: bash scripts/build_linux.sh
-      - name: Smoke-test packaged executable
+      - name: Self-test packaged executable
         env:
           QT_QPA_PLATFORM: offscreen
-        run: timeout 30s dist/Lyricaod/Lyricaod --help
+        run: timeout 30s dist/Lyricaod/Lyricaod --self-test
       - name: Preserve executable permissions
         run: tar -czf dist/Lyricaod-linux.tar.gz -C dist Lyricaod
       - name: Upload tested package
@@ -101,7 +106,7 @@ jobs:
           if-no-files-found: error
 
   windows-package:
-    name: Windows package and smoke test
+    name: Windows package and self-test
     needs: [quality, windows-test]
     runs-on: windows-2025
     steps:
@@ -114,14 +119,14 @@ jobs:
       - name: Build locked package
         shell: pwsh
         run: .\scripts\build_windows.ps1
-      - name: Smoke-test packaged executable
+      - name: Self-test packaged executable
         shell: pwsh
         env:
           # Redirecting the streams below hands the windowed process a real
-          # stdout, and argparse then writes the Japanese --help text to it.
-          # The runner's ANSI code page (cp1252) cannot encode that, so without
-          # this the process dies with UnicodeEncodeError instead of reporting
-          # whether the executable actually starts, which is what this gates.
+          # stdout, and the self-test then writes its Japanese failure detail
+          # to it. The runner's ANSI code page (cp1252) cannot encode that, so
+          # without this the process dies with UnicodeEncodeError instead of
+          # reporting which check failed, which is what this gates.
           PYTHONIOENCODING: "utf-8:replace"
         run: |
           # The package is a GUI-subsystem binary: invoking it directly returns
@@ -130,7 +135,7 @@ jobs:
           # also hands the windowed process usable stdout/stderr handles.
           $startArgs = @{
             FilePath               = '.\dist\Lyricaod\Lyricaod.exe'
-            ArgumentList           = '--help'
+            ArgumentList           = '--self-test'
             PassThru               = $true
             NoNewWindow            = $true
             RedirectStandardOutput = 'smoke-stdout.txt'
@@ -140,12 +145,12 @@ jobs:
           if (-not $proc.WaitForExit(60000)) {
             $proc.Kill()
             Get-Content smoke-stderr.txt -ErrorAction SilentlyContinue
-            throw 'Packaged executable did not exit within 60 seconds'
+            throw 'Packaged self-test did not exit within 60 seconds'
           }
           Get-Content smoke-stdout.txt -ErrorAction SilentlyContinue
           Get-Content smoke-stderr.txt -ErrorAction SilentlyContinue
           if ($proc.ExitCode -ne 0) {
-            throw "Packaged executable exited with code $($proc.ExitCode)"
+            throw "Packaged self-test exited with code $($proc.ExitCode)"
           }
       - name: Create package archive
         shell: pwsh
