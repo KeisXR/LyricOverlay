@@ -70,6 +70,9 @@ def _stubbed_modules(modules):
                 sys.modules[name] = previous
 
 
+MODULE_PATH = Path(__file__).resolve().parents[1] / "src" / "ui" / "tray.py"
+
+
 def _load_tray_module():
     """Import src/ui/tray.py without leaving stubs behind in sys.modules."""
     qtcore = types.ModuleType("PySide6.QtCore")
@@ -94,8 +97,7 @@ def _load_tray_module():
     settings_dialog_module = types.ModuleType("ui.settings_dialog")
     settings_dialog_module.SettingsDialog = _Dummy
 
-    path = Path(__file__).resolve().parents[1] / "src" / "ui" / "tray.py"
-    spec = importlib.util.spec_from_file_location("tray_under_test", path)
+    spec = importlib.util.spec_from_file_location("tray_under_test", MODULE_PATH)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     stubs = {
@@ -186,15 +188,63 @@ def test_fallback_never_leaves_overlay_hidden():
     assert app.overlay.show_count == 2
 
 
-def test_create_falls_back_when_tray_is_reported_unavailable(monkeypatch):
-    monkeypatch.setattr(tray_module.QSystemTrayIcon, "tray_available", False)
+WATCHER = "org.kde.StatusNotifierWatcher"
+
+
+class _FakeBus:
+    """Minimal dbus.SessionBus stand-in for the StatusNotifier probe."""
+
+    def __init__(self, owners, host_registered):
+        self._owners = owners
+        self._host_registered = host_registered
+        self.probed = []
+
+    def name_has_owner(self, service):
+        self.probed.append(service)
+        return service in self._owners
+
+    def get_object(self, service, path):
+        assert path == "/StatusNotifierWatcher"
+        return ("proxy", service)
+
+
+def _fake_dbus(owners=(WATCHER,), host_registered=True):
+    """Build a fake ``dbus`` module plus the bus it hands out."""
+    tray_module._TRAY_PROBE_RETRY_DELAY_SEC = 0
+    bus = _FakeBus(set(owners), host_registered)
+
+    class _Props:
+        def __init__(self, proxy, iface):
+            self._service = proxy[1]
+
+        def Get(self, service, prop, timeout=None):
+            assert prop == "IsStatusNotifierHostRegistered"
+            assert timeout is not None, "the probe must not block indefinitely"
+            answer = bus._host_registered
+            if isinstance(answer, list):
+                # One answer per probe round, so a host can appear on the retry.
+                return answer.pop(0) if len(answer) > 1 else answer[0]
+            return answer
+
+    module = types.ModuleType("dbus")
+    module.SessionBus = lambda: bus
+    module.Interface = _Props
+    return module, bus
+
+
+def test_create_falls_back_when_no_statusnotifier_host_is_registered():
+    # Wayland has no XEmbed fallback, so a watcher without a registered host
+    # means the tray icon would never be displayed anywhere.
+    module, bus = _fake_dbus(host_registered=False)
     app = _App()
 
-    tray = tray_module.TrayIcon.create(app)
+    with _stubbed_modules({"dbus": module}):
+        tray = tray_module.TrayIcon.create(app)
 
     assert isinstance(tray, tray_module.TraylessFallback)
     assert tray.available is False
     assert app.overlay.show_count == 1
+    assert WATCHER in bus.probed
 
     # The overlay ✕ button routes through set_show_checked(False); with a real
     # TrayIcon that would hide the overlay for good.
@@ -203,13 +253,53 @@ def test_create_falls_back_when_tray_is_reported_unavailable(monkeypatch):
     assert app.overlay.show_count == 2
 
 
-def test_create_keeps_real_tray_when_one_is_available():
+def test_create_falls_back_when_no_watcher_owns_the_name():
+    module, bus = _fake_dbus(owners=())
     app = _App()
 
-    tray = tray_module.TrayIcon.create(app)
+    with _stubbed_modules({"dbus": module}):
+        tray = tray_module.TrayIcon.create(app)
 
-    assert isinstance(tray, tray_module.TrayIcon)
-    assert app.overlay.show_count == 0
+    assert isinstance(tray, tray_module.TraylessFallback)
+
+
+def test_create_keeps_real_tray_when_a_host_is_registered():
+    module, _bus = _fake_dbus(host_registered=True)
+    app = _App()
+
+    with _stubbed_modules({"dbus": module}):
+        tray = tray_module.TrayIcon.create(app)
+
+    assert not isinstance(tray, tray_module.TraylessFallback)
+
+
+def test_probe_is_skipped_and_tray_kept_off_wayland():
+    # On X11 the StatusNotifier watcher may legitimately be absent while an
+    # XEmbed tray works, so the probe must not run at all.
+    module, bus = _fake_dbus(owners=(), host_registered=False)
+    app = _App()
+    app.overlay.is_wayland = lambda: False
+
+    with _stubbed_modules({"dbus": module}):
+        tray = tray_module.TrayIcon.create(app)
+
+    assert not isinstance(tray, tray_module.TraylessFallback)
+    assert bus.probed == []
+
+
+def test_tray_module_never_calls_is_system_tray_available():
+    # Regression guard: QSystemTrayIcon.isSystemTrayAvailable() can segfault on
+    # Wayland (Qt6 bug), which is why detection goes through D-Bus instead.
+    # A native crash cannot be caught by try/except, and a stubbed Qt in these
+    # tests would never reproduce it -- so the ban is enforced on the source.
+    source = MODULE_PATH.read_text(encoding="utf-8")
+    calls = [
+        line.strip()
+        for line in source.splitlines()
+        if "isSystemTrayAvailable()" in line and not line.strip().startswith("#")
+        and "``" not in line
+    ]
+    assert calls == [], f"isSystemTrayAvailable must not be called: {calls}"
 
 
 def test_auto_player_selection_clears_pin():
@@ -222,3 +312,16 @@ def test_auto_player_selection_clears_pin():
 
     assert app.settings.get("behavior.pinned_player") is None
     assert app.mpris.unpinned == 1
+
+
+def test_host_appearing_on_the_retry_keeps_the_real_tray():
+    # A panel that registers its StatusNotifier host just after start-up must
+    # not be mistaken for a tray-less session.
+    module, bus = _fake_dbus(host_registered=[False, True])
+    app = _App()
+
+    with _stubbed_modules({"dbus": module}):
+        tray = tray_module.TrayIcon.create(app)
+
+    assert not isinstance(tray, tray_module.TraylessFallback)
+    assert bus.probed.count(WATCHER) == 2

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
@@ -25,6 +26,62 @@ def _make_icon() -> QIcon:
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "♪")
     painter.end()
     return QIcon(pixmap)
+
+
+_TRAY_PROBE_TIMEOUT_SEC = 1.0
+# A session started before the panel finished registering its StatusNotifier
+# host would otherwise be mistaken for a tray-less one, so a negative result
+# is retried once before we give up on the tray.
+_TRAY_PROBE_RETRY_DELAY_SEC = 0.5
+
+
+def _status_notifier_host_registered(dbus) -> bool:
+    bus = dbus.SessionBus()
+    for service in (
+        "org.kde.StatusNotifierWatcher",
+        "org.freedesktop.StatusNotifierWatcher",
+    ):
+        if not bus.name_has_owner(service):
+            continue
+        props = dbus.Interface(
+            bus.get_object(service, "/StatusNotifierWatcher"),
+            "org.freedesktop.DBus.Properties",
+        )
+        registered = props.Get(
+            service,
+            "IsStatusNotifierHostRegistered",
+            timeout=_TRAY_PROBE_TIMEOUT_SEC,
+        )
+        if bool(registered):
+            return True
+    return False
+
+
+def _tray_host_missing(app) -> bool:
+    """Report a conclusively absent tray without asking Qt.
+
+    ``QSystemTrayIcon.isSystemTrayAvailable()`` can segfault on Wayland (Qt6
+    bug), so it is never called. Wayland has no XEmbed fallback either: the
+    StatusNotifier D-Bus host is the only tray mechanism there, so its absence
+    is conclusive. Every uncertain case -- X11, Windows, a missing binding, a
+    D-Bus failure -- returns False, keeping the ordinary tray path.
+    """
+    try:
+        if not app.overlay.is_wayland():
+            return False
+    except Exception:
+        return False
+    try:
+        import dbus
+    except Exception:
+        return False
+    try:
+        if _status_notifier_host_registered(dbus):
+            return False
+        time.sleep(_TRAY_PROBE_RETRY_DELAY_SEC)
+        return not _status_notifier_host_registered(dbus)
+    except Exception:
+        return False
 
 
 class TraylessFallback:
@@ -69,11 +126,12 @@ class TrayIcon(QSystemTrayIcon):
     @classmethod
     def create(cls, app, parent=None):
         try:
-            # Qt happily constructs, paints and shows a tray icon even when no
-            # StatusNotifier host exists; absence is only reported here.
-            if not QSystemTrayIcon.isSystemTrayAvailable():
+            # Qt constructs, paints and shows a tray icon even when nothing can
+            # host it, so absence has to be established before we commit to a
+            # real tray. _tray_host_missing does that without isSystemTrayAvailable().
+            if _tray_host_missing(app):
                 logger.warning(
-                    "No system tray is available; using visible fallback"
+                    "No system tray host is available; using visible fallback"
                 )
                 return TraylessFallback(app)
             tray = cls(app, parent)
@@ -86,12 +144,6 @@ class TrayIcon(QSystemTrayIcon):
                 tray._update_player_menu_checks
             )
             tray.show()
-            if not QSystemTrayIcon.isSystemTrayAvailable() or not tray.isVisible():
-                logger.warning(
-                    "System tray icon never became visible; using visible fallback"
-                )
-                tray.hide()
-                return TraylessFallback(app)
             tray._rebuild_player_menu(tray._app.mpris.get_players())
             return tray
         except Exception:
