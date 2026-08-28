@@ -10,6 +10,12 @@ from difflib import SequenceMatcher
 _SPACE_RE = re.compile(r"\s+")
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 
+_TITLE_MIN_SIMILARITY = 0.62
+_TITLE_RELAXED_MIN_SIMILARITY = 0.45
+_TITLE_CONTAINMENT_MIN_COVERAGE = 0.25
+_EXACT_ARTIST_SIMILARITY = 0.99
+_AGREEING_DURATION_SIMILARITY = 0.9
+
 
 @dataclass(frozen=True)
 class TrackQuery:
@@ -57,6 +63,37 @@ def text_similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _title_containment(left: str, right: str) -> float:
+    """Score titles that differ only by a trailing qualifier.
+
+    Version labels such as ``(acoustic ver.)`` and bracketed romanisations are
+    appended to the base title, so after normalisation the shorter title is a
+    whole-token prefix of the longer one. CJK titles have no whitespace tokens,
+    so the token overlap used by :func:`artist_similarity` cannot see this,
+    while prefix containment can. A partial word (``"go"`` inside
+    ``"going under"``), different leading text, or a sliver of the longer title
+    is not containment and scores 0.
+    """
+    shorter, longer = (left, right) if len(left) <= len(right) else (right, left)
+    if not longer.startswith(shorter) or longer[len(shorter)] != " ":
+        return 0.0
+    coverage = len(shorter) / len(longer)
+    if coverage < _TITLE_CONTAINMENT_MIN_COVERAGE:
+        return 0.0
+    return 0.6 + 0.4 * coverage
+
+
+def title_similarity(left: str, right: str) -> float:
+    a = normalise_match_text(left)
+    b = normalise_match_text(right)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    sequence = SequenceMatcher(None, a, b).ratio()
+    return max(sequence, _title_containment(a, b))
+
+
 def artist_similarity(left: str, right: str) -> float:
     a = normalise_match_text(left)
     b = normalise_match_text(right)
@@ -84,7 +121,7 @@ def duration_similarity(query_ms: int, candidate_ms: int) -> float:
 
 
 def rank_candidate(query: TrackQuery, candidate: CandidateMetadata) -> RankedCandidate:
-    title_sim = text_similarity(query.title, candidate.title)
+    title_sim = title_similarity(query.title, candidate.title)
     artist_sim = artist_similarity(query.artist, candidate.artist) if query.artist else 1.0
     album_sim = (
         text_similarity(query.album, candidate.album)
@@ -123,7 +160,20 @@ def rank_candidate(query: TrackQuery, candidate: CandidateMetadata) -> RankedCan
         else "empty",
     ]
 
-    acceptable = title_sim >= 0.62 and score >= 62.0
+    # An exact artist plus an agreeing duration is strong enough evidence that
+    # a remaining title difference is a notation variant rather than a
+    # different song, so the title bar is lowered instead of dropping the
+    # candidate outright.
+    title_floor = _TITLE_MIN_SIMILARITY
+    if (
+        query.artist
+        and artist_sim >= _EXACT_ARTIST_SIMILARITY
+        and duration_sim >= _AGREEING_DURATION_SIMILARITY
+    ):
+        title_floor = _TITLE_RELAXED_MIN_SIMILARITY
+        reasons.append("relaxed-title-threshold")
+
+    acceptable = title_sim >= title_floor and score >= 62.0
     if query.artist and artist_sim < 0.58:
         acceptable = False
         reasons.append("artist-below-threshold")

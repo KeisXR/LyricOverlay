@@ -59,6 +59,22 @@ def _queries(
     ]
 
 
+def _syncedlyrics_fast_path_allowed(queries: list[TrackQuery]) -> bool:
+    """Return whether a synced syncedlyrics hit may skip the other providers.
+
+    ``get_syncedlyrics`` echoes the artist and title it searched with back into
+    its result, so ranking that metadata only ever reproduces the query and can
+    never detect a mismatch. The one piece of evidence that is not echoed is the
+    query set itself: when the player metadata has a competing interpretation,
+    the first variant is a guess, so its unverified hit has to compete with the
+    other candidates through the normal ranking instead of ending the search.
+    """
+    if len(queries) != 1:
+        return False
+    query = queries[0]
+    return bool(query.artist and query.title)
+
+
 def _pick(
     queries: list[TrackQuery],
     results: list[ProviderResult],
@@ -108,15 +124,18 @@ def select_primary_result(
 ) -> tuple[str, object] | None:
     """Return the highest-quality acceptable provider result.
 
-    A high-confidence synced result may use the fast path. A plain result never
-    stops provider traversal, so a later provider can still supply synced
-    lyrics. Search variants are used for lookup and ranking without mutating the
-    canonical metadata received from the player.
+    A synced result may use the fast path only when the player metadata has a
+    single interpretation, because syncedlyrics attests no metadata of its own.
+    A plain result never stops provider traversal, so a later provider can still
+    supply synced lyrics. Search variants are used for lookup and ranking
+    without mutating the canonical metadata received from the player. A failing
+    provider never discards candidates already collected from other providers.
     """
     queries = _queries(artist, title, album, duration_ms)
     collected: list[ProviderResult] = []
 
     if use_syncedlyrics:
+        fast_path_allowed = _syncedlyrics_fast_path_allowed(queries)
         for query in queries:
             if cancelled():
                 return None
@@ -135,8 +154,7 @@ def select_primary_result(
                 "syncedlyrics", result, _syncedlyrics_candidate(result)
             )
             _append_unique(collected, provider_result)
-            ranked = rank_candidates(queries, [provider_result.metadata])[0]
-            if result.synced_lyrics and ranked.acceptable and ranked.score >= 90.0:
+            if result.synced_lyrics and fast_path_allowed:
                 return "syncedlyrics", result
             if result.synced_lyrics:
                 break
@@ -146,12 +164,16 @@ def select_primary_result(
         for query in queries:
             if cancelled():
                 return None
-            direct = get_lrclib(
-                query.artist,
-                query.title,
-                query.album,
-                query.duration_ms,
-            )
+            try:
+                direct = get_lrclib(
+                    query.artist,
+                    query.title,
+                    query.album,
+                    query.duration_ms,
+                )
+            except Exception as exc:
+                logger.warning("LRClib direct lookup failed: %s", exc)
+                direct = None
             if direct:
                 _append_unique(
                     collected,
@@ -166,13 +188,18 @@ def select_primary_result(
         for query in queries:
             if cancelled():
                 return None
-            for result in search_all(
-                query.artist,
-                query.title,
-                query.album,
-                query.duration_ms,
-                max_results=6,
-            ):
+            try:
+                found = search_all(
+                    query.artist,
+                    query.title,
+                    query.album,
+                    query.duration_ms,
+                    max_results=6,
+                )
+            except Exception as exc:
+                logger.warning("LRClib search failed: %s", exc)
+                found = []
+            for result in found:
                 _append_unique(
                     collected,
                     ProviderResult("lrclib", result, _lrclib_candidate(result)),

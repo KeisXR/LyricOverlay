@@ -57,6 +57,68 @@ def test_large_duration_difference_is_rejected():
     assert "duration-below-threshold" in ranked.reasons
 
 
+def test_version_label_title_matches_by_containment():
+    ranked = rank_candidate(
+        TrackQuery("みゆはん", "ぼくのフレンド（acoustic ver.）", "", 180000),
+        candidate(
+            artist="みゆはん",
+            title="ぼくのフレンド",
+            album="",
+            duration_ms=190000,
+            synced=True,
+            plain=False,
+        ),
+    )
+    assert ranked.acceptable
+    assert "relaxed-title-threshold" not in ranked.reasons
+
+
+def test_relaxed_title_threshold_accepts_notation_variant():
+    ranked = rank_candidate(
+        TrackQuery("YOASOBI", "アイドル (Idol)", "", 233000),
+        candidate(
+            artist="YOASOBI",
+            title="Idol",
+            album="",
+            duration_ms=233000,
+            synced=True,
+            plain=False,
+        ),
+    )
+    assert ranked.acceptable
+    assert "relaxed-title-threshold" in ranked.reasons
+
+
+def test_relaxed_title_threshold_requires_agreeing_duration():
+    ranked = rank_candidate(
+        TrackQuery("YOASOBI", "アイドル (Idol)", "", 233000),
+        candidate(
+            artist="YOASOBI",
+            title="Idol",
+            album="",
+            duration_ms=253000,
+            synced=True,
+            plain=False,
+        ),
+    )
+    assert not ranked.acceptable
+
+
+def test_partial_word_title_overlap_is_not_containment():
+    ranked = rank_candidate(
+        TrackQuery("Artist", "Go", "", 0),
+        candidate(
+            artist="Artist",
+            title="Going Under",
+            album="",
+            duration_ms=0,
+            synced=True,
+            plain=False,
+        ),
+    )
+    assert not ranked.acceptable
+
+
 def test_alternate_query_can_match_without_mutating_canonical_query():
     canonical = TrackQuery("Uploader", "Song / Real Artist", "", 180000)
     alternate = TrackQuery("Real Artist", "Song", "", 180000)
