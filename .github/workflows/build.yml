@@ -116,6 +116,13 @@ jobs:
         run: .\scripts\build_windows.ps1
       - name: Smoke-test packaged executable
         shell: pwsh
+        env:
+          # Redirecting the streams below hands the windowed process a real
+          # stdout, and argparse then writes the Japanese --help text to it.
+          # The runner's ANSI code page (cp1252) cannot encode that, so without
+          # this the process dies with UnicodeEncodeError instead of reporting
+          # whether the executable actually starts, which is what this gates.
+          PYTHONIOENCODING: "utf-8:replace"
         run: |
           # The package is a GUI-subsystem binary: invoking it directly returns
           # before it runs and leaves $LASTEXITCODE unset, so the step reported
