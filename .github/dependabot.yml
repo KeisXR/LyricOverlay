@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # The pip ecosystem only discovers requirements*.txt, *.in, Pipfile and
+  # pyproject.toml. The pinned files must therefore keep a .txt extension or
+  # Dependabot silently skips the versions CI and the packaged builds use.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      python-runtime:
+        patterns:
+          - "*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

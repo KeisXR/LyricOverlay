@@ -1,4 +1,4 @@
-name: Build Packages
+name: Quality and Packages
 
 on:
   workflow_dispatch:
@@ -6,37 +6,153 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-packages-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUNBUFFERED: "1"
+
 jobs:
-  windows:
-    name: Windows
-    runs-on: windows-latest
+  quality:
+    name: Linux quality gates
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Build package
-        shell: pwsh
-        run: .\scripts\build_windows.ps1
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Lyricaod-windows
-          path: dist/Lyricaod
-
-  linux:
-    name: Linux
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install system dependencies
+          cache: pip
+          cache-dependency-path: requirements-dev-lock.txt
+      - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-venv python3-dbus python3-gi gir1.2-glib-2.0 libegl1 libopengl0 libxcb-cursor0
-      - name: Build package
+          sudo apt-get install -y \
+            libdbus-1-dev libglib2.0-dev pkg-config \
+            libegl1 libopengl0 libxcb-cursor0
+      - name: Install locked test dependencies
+        run: |
+          python -m pip install "pip==26.1.1"
+          python -m pip install -r requirements-dev-lock.txt
+      - name: Compile check
+        run: python -m compileall -q src tests
+      - name: Ruff correctness checks
+        run: ruff check src tests
+      - name: Incremental type check
+        run: mypy src/lyrics/lrc_parser.py src/meta_utils.py src/ui/color_utils.py
+      - name: Unit and offscreen Qt tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q
+
+  windows-test:
+    name: Windows tests
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev-lock.txt
+      - name: Install locked test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install "pip==26.1.1"
+          python -m pip install -r requirements-dev-lock.txt
+      - name: Compile check
+        run: python -m compileall -q src tests
+      - name: Ruff correctness checks
+        run: ruff check src tests
+      - name: Unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q
+
+  linux-package:
+    name: Linux package and smoke test
+    needs: quality
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install native runtime and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3-venv python3-dbus python3-gi gir1.2-glib-2.0 \
+            libegl1 libopengl0 libxcb-cursor0
+      - name: Build locked package
         run: bash scripts/build_linux.sh
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Smoke-test packaged executable
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: timeout 30s dist/Lyricaod/Lyricaod --help
+      - name: Preserve executable permissions
+        run: tar -czf dist/Lyricaod-linux.tar.gz -C dist Lyricaod
+      - name: Upload tested package
+        uses: actions/upload-artifact@v7
         with:
           name: Lyricaod-linux
-          path: dist/Lyricaod
+          path: dist/Lyricaod-linux.tar.gz
+          if-no-files-found: error
+
+  windows-package:
+    name: Windows package and smoke test
+    needs: [quality, windows-test]
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-build-lock.txt
+      - name: Build locked package
+        shell: pwsh
+        run: .\scripts\build_windows.ps1
+      - name: Smoke-test packaged executable
+        shell: pwsh
+        env:
+          # Redirecting the streams below hands the windowed process a real
+          # stdout, and argparse then writes the Japanese --help text to it.
+          # The runner's ANSI code page (cp1252) cannot encode that, so without
+          # this the process dies with UnicodeEncodeError instead of reporting
+          # whether the executable actually starts, which is what this gates.
+          PYTHONIOENCODING: "utf-8:replace"
+        run: |
+          # The package is a GUI-subsystem binary: invoking it directly returns
+          # before it runs and leaves $LASTEXITCODE unset, so the step reported
+          # success whatever the executable did. Redirecting the standard streams
+          # also hands the windowed process usable stdout/stderr handles.
+          $startArgs = @{
+            FilePath               = '.\dist\Lyricaod\Lyricaod.exe'
+            ArgumentList           = '--help'
+            PassThru               = $true
+            NoNewWindow            = $true
+            RedirectStandardOutput = 'smoke-stdout.txt'
+            RedirectStandardError  = 'smoke-stderr.txt'
+          }
+          $proc = Start-Process @startArgs
+          if (-not $proc.WaitForExit(60000)) {
+            $proc.Kill()
+            Get-Content smoke-stderr.txt -ErrorAction SilentlyContinue
+            throw 'Packaged executable did not exit within 60 seconds'
+          }
+          Get-Content smoke-stdout.txt -ErrorAction SilentlyContinue
+          Get-Content smoke-stderr.txt -ErrorAction SilentlyContinue
+          if ($proc.ExitCode -ne 0) {
+            throw "Packaged executable exited with code $($proc.ExitCode)"
+          }
+      - name: Create package archive
+        shell: pwsh
+        run: Compress-Archive -Path .\dist\Lyricaod -DestinationPath .\dist\Lyricaod-windows.zip -Force
+      - name: Upload tested package
+        uses: actions/upload-artifact@v7
+        with:
+          name: Lyricaod-windows
+          path: dist/Lyricaod-windows.zip
+          if-no-files-found: error

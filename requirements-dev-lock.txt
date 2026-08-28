@@ -1,0 +1,7 @@
+-r requirements-lock.txt
+
+pytest==9.0.2
+pytest-qt==4.5.0
+ruff==0.15.0
+mypy==1.19.1
+mypy_extensions==1.1.0
