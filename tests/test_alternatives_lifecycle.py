@@ -146,6 +146,14 @@ def _make_app(main_module, lyrics, overlay):
     """
     application = main_module.Application
     app = types.SimpleNamespace(lyrics=lyrics, overlay=overlay, _current_meta={})
+    # Application.__init__ is not run here, so collaborators the handlers reach
+    # for must be supplied. _normalise_meta is the real one: normalisation
+    # decides the artist/title these handlers pass on.
+    from meta_utils import normalise_yt_meta
+
+    app._normalise_meta = normalise_yt_meta
+    app._set_runtime_state = lambda *args, **kwargs: None
+    app._on_lyrics_error = lambda *args, **kwargs: None
     app.metadata_changed = lambda meta: application._on_metadata_changed(app, meta)
     app.click_alternatives_button = lambda: application._on_alternatives_requested(app)
     app._slots = [

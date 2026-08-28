@@ -44,6 +44,7 @@ class DiagnosticLyricsManager(LyricsManager):
         album: str = "",
         trackid: str = "",
         duration_ms: int = 0,
+        force_refresh: bool = False,
     ):
         if title:
             key = self._make_key(artist, title, trackid)
@@ -66,16 +67,49 @@ class DiagnosticLyricsManager(LyricsManager):
             return
 
         self.delivery_status = "cache_hit" if cached is not None else "network"
-        return super().fetch_lyrics(artist, title, album, trackid, duration_ms)
+        return super().fetch_lyrics(
+            artist, title, album, trackid, duration_ms, force_refresh
+        )
 
-    def _on_fetch_done(self, result, artist, title, key, req_id):
+    def _on_fetch_done(
+        self,
+        result,
+        artist,
+        title,
+        key,
+        req_id,
+        cached_result=None,
+        cached_alts=None,
+        force_refresh: bool = False,
+    ):
         if req_id == self._req_id:
             self.delivery_status = "network"
-        return super()._on_fetch_done(result, artist, title, key, req_id)
+        return super()._on_fetch_done(
+            result, artist, title, key, req_id,
+            cached_result, cached_alts, force_refresh,
+        )
 
-    def _on_fetch_error(self, artist, title, req_id, message: str = ""):
+    def _on_fetch_error(
+        self,
+        artist,
+        title,
+        key,
+        req_id,
+        message: str = "",
+        cached_result=None,
+        cached_alts=None,
+        force_refresh: bool = False,
+    ):
         if req_id != self._req_id:
             return
+        if force_refresh and cached_result is not None:
+            # A failed reload still has usable lyrics: let the base class serve
+            # the cached ones instead of reporting an error over them.
+            self.delivery_status = "cache_hit"
+            return super()._on_fetch_error(
+                artist, title, key, req_id, message,
+                cached_result, cached_alts, force_refresh,
+            )
         self._cached_alternatives = []
         code = self._classify_error(message)
         self.delivery_status = code
