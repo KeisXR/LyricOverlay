@@ -322,6 +322,55 @@ def test_alternatives_after_cache_hit_use_current_track_key(
     assert [a.title for a in alts_b] == ["Song B alt"]
 
 
+def test_stale_alternatives_result_emits_terminal_empty_signal(
+    isolated_cache_dir, monkeypatch
+):
+    monkeypatch.setattr(manager_module, "_FetchAltThread", _FakeAltThread)
+    _FakeAltThread.next_results = []
+    manager = LyricsManager()
+    emitted = []
+    manager.alternatives_ready.connect(emitted.append)
+
+    key_a = manager._make_key("artist-a", "Song A", "")
+    key_b = manager._make_key("artist-b", "Song B", "")
+    for key, artist, title in (
+        (key_a, "artist-a", "Song A"),
+        (key_b, "artist-b", "Song B"),
+    ):
+        manager._put_cache(
+            key,
+            LyricsData(
+                artist=artist,
+                title=title,
+                synced=False,
+                lrc=None,
+                plain_text=title,
+                source="cache",
+            ),
+            [],
+        )
+
+    manager.fetch_lyrics("artist-a", "Song A")
+    manager.fetch_alternatives("artist-a", "Song A")
+    stale_req = manager._req_id
+    emitted.clear()
+
+    # Track change served from the cache bumps the generation.
+    manager.fetch_lyrics("artist-b", "Song B")
+
+    manager._on_alternatives_done(
+        [LrcLibResult(track_name="Song A alt", artist_name="artist-a")],
+        key_a,
+        stale_req,
+    )
+
+    # A terminal signal is delivered so the UI can leave its loading state,
+    # but the stale results are neither emitted nor cached.
+    assert emitted == [[]]
+    assert manager._cached_alternatives == []
+    assert manager._get_cached(key_a)[1] == []
+
+
 def test_force_refresh_bypasses_cache_and_calls_provider(
     isolated_cache_dir, monkeypatch
 ):

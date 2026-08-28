@@ -559,6 +559,11 @@ class LyricsManager(QObject):
 
     def _on_alternatives_done(self, results: list, key, req_id):
         if req_id != self._req_id:
+            # Superseded by a newer request: the stale results must never be
+            # delivered, but the UI still needs a terminal signal so its
+            # "loading alternatives" state does not stay on forever.
+            print("[Lyrics] alternatives discarded: superseded by a newer request")
+            self.alternatives_ready.emit([])
             return
         if not results:
             self.alternatives_ready.emit([])

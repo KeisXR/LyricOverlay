@@ -260,6 +260,11 @@ class Application:
         self.overlay.set_seek(0, length_ms)
         if title:
             self.overlay.set_loading(True)
+            # fetch_lyrics starts a new request generation, so any alternatives
+            # fetch still in flight is discarded (it may even be cancelled
+            # before it emits): clear its loading state here so the
+            # alternatives button never stays stuck on "…".
+            self.overlay.set_alternatives_loading(False)
             try:
                 self.lyrics.fetch_lyrics(
                     artist,
@@ -323,9 +328,12 @@ class Application:
 
     def _on_alternatives_ready(self, alternatives: list):
         self.overlay.set_alternatives_loading(False)
+        if not alternatives:
+            # No matches, or a discarded stale fetch: keep whatever the
+            # current track already has instead of wiping it.
+            return
         self.overlay.set_alternatives(alternatives)
-        if alternatives:
-            self.overlay._show_alternatives_menu()
+        self.overlay._show_alternatives_menu()
 
     def _on_settings_changed(self):
         self.lyrics.set_lrclib_enabled(
