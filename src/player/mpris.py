@@ -133,8 +133,8 @@ class MprisListener(QObject):
         player = self._players.pop(bus_name, None)
         if player:
             self._disconnect_receivers(player.get("receivers", []))
-        if bus_name == self._pinned_player:
-            self._pinned_player = ""
+        # Keep the pin: the same bus name often comes back (player restart),
+        # and _select_active() restores it as soon as it is available again.
         self.players_changed.emit(list(self._players.keys()))
         if bus_name == self._active_player:
             self._select_active()

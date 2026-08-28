@@ -1,5 +1,6 @@
 """Unit tests for MPRIS listener timeline isolation."""
 
+import contextlib
 import importlib.util
 import sys
 import types
@@ -9,6 +10,26 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+
+@contextlib.contextmanager
+def _stubbed_modules(modules):
+    """Temporarily install ``modules`` in sys.modules and restore it after.
+
+    Leaking the stubs would break unrelated test files that import the real
+    PySide6 / dbus / gi packages later in the same interpreter.
+    """
+    missing = object()
+    saved = {name: sys.modules.get(name, missing) for name in modules}
+    sys.modules.update(modules)
+    try:
+        yield
+    finally:
+        for name, previous in saved.items():
+            if previous is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
 
 class _SignalInstance:
@@ -132,7 +153,7 @@ class _FakeBus:
         }
 
 
-def _install_fake_modules(bus):
+def _fake_modules(bus):
     dbus_module = types.ModuleType("dbus")
     dbus_module.DBusException = _FakeDBusException
     dbus_module.Dictionary = dict
@@ -159,30 +180,39 @@ def _install_fake_modules(bus):
     pyside6 = types.ModuleType("PySide6")
     pyside6.QtCore = qtcore
 
-    sys.modules["dbus"] = dbus_module
-    sys.modules["dbus.mainloop"] = dbus_mainloop
-    sys.modules["dbus.mainloop.glib"] = dbus_mainloop_glib
-    sys.modules["gi"] = gi_module
-    sys.modules["gi.repository"] = gi_repo
-    sys.modules["PySide6"] = pyside6
-    sys.modules["PySide6.QtCore"] = qtcore
+    return {
+        "dbus": dbus_module,
+        "dbus.mainloop": dbus_mainloop,
+        "dbus.mainloop.glib": dbus_mainloop_glib,
+        "gi": gi_module,
+        "gi.repository": gi_repo,
+        "PySide6": pyside6,
+        "PySide6.QtCore": qtcore,
+    }
 
 
-def _load_mpris_module():
+def _load_mpris_module(bus):
     module_path = SRC / "player" / "mpris.py"
     spec = importlib.util.spec_from_file_location("test_mpris_module", module_path)
-    module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
-    spec.loader.exec_module(module)
+    module = importlib.util.module_from_spec(spec)
+    stubs = _fake_modules(bus)
+    stubs[spec.name] = module
+    # The stubs only need to be visible while the module runs its imports;
+    # afterwards it keeps its own references to them, so sys.modules can be
+    # restored immediately.
+    with _stubbed_modules(stubs):
+        spec.loader.exec_module(module)
     return module
 
 
 def _make_listener():
     bus = _FakeBus()
-    _install_fake_modules(bus)
-    mpris = _load_mpris_module()
+    mpris = _load_mpris_module(bus)
     fake_clock = types.SimpleNamespace(now=1000.0)
-    mpris.time.monotonic = lambda: fake_clock.now
+    # Rebind only this freshly loaded module's ``time`` name so the real
+    # stdlib time.monotonic is never patched.
+    mpris.time = types.SimpleNamespace(monotonic=lambda: fake_clock.now)
     listener = mpris.MprisListener()
     return mpris, bus, listener
 
@@ -284,6 +314,31 @@ def test_remove_active_player_moves_to_next_playing():
     assert bus.position_get_calls.get("B", 0) >= before_calls + 1
 
 
+def test_pin_survives_pinned_player_restart():
+    mpris, bus, listener = _make_listener()
+    bus.set_player("A", status="Playing", position_us=100_000)
+    bus.set_player("B", status="Playing", position_us=600_000)
+    listener._add_player("A")
+    listener._add_player("B")
+    listener.pin_player("A")
+
+    assert listener.get_active_player() == "A"
+
+    # The pinned player quits (NameOwnerChanged with an empty new owner).
+    listener._remove_player("A")
+    assert listener.get_active_player() == "B"
+
+    # It comes back under the same bus name and starts playing again.
+    bus.set_player("A", status="Playing", position_us=0)
+    listener._add_player("A")
+    listener._on_properties_changed(
+        "A", mpris.MPRIS_PLAYER_IFACE, {"PlaybackStatus": "Playing"}, []
+    )
+
+    assert listener._pinned_player == "A"
+    assert listener.get_active_player() == "A"
+
+
 def test_sync_failure_keeps_last_valid_anchor():
     _mpris, bus, listener = _make_listener()
     bus.set_player("A", status="Playing", position_us=345_000)
@@ -319,6 +374,7 @@ if __name__ == "__main__":
         ("switch_to_playing_player_syncs_immediately", test_switch_to_playing_player_syncs_immediately),
         ("pinned_player_is_not_switched_by_other_playing", test_pinned_player_is_not_switched_by_other_playing),
         ("remove_active_player_moves_to_next_playing", test_remove_active_player_moves_to_next_playing),
+        ("pin_survives_pinned_player_restart", test_pin_survives_pinned_player_restart),
         ("sync_failure_keeps_last_valid_anchor", test_sync_failure_keeps_last_valid_anchor),
         ("stop_stops_timers_and_receivers", test_stop_stops_timers_and_receivers),
     ]
