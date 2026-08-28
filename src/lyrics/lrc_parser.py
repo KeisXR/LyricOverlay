@@ -37,11 +37,54 @@ _HEADER_RE = re.compile(r"\[(ti|ar|al|offset|length):\s*(.+)\]", re.IGNORECASE)
 _WORDTIME_RE = re.compile(r"<(\d{1,3}):(\d{1,2}(?:\.\d+)?)>")
 
 
+def _parse_timestamp_ms(mins: str, secs: str) -> int:
+    seconds, dot, fraction = secs.partition(".")
+    frac_ms = int((fraction + "000")[:3]) if dot else 0
+    return int(mins) * 60000 + int(seconds) * 1000 + frac_ms
+
+
+def _parse_enhanced_words(content: str) -> tuple[str, list[LyricWord] | None]:
+    matches = list(_WORDTIME_RE.finditer(content))
+    if not matches:
+        return content.strip(), None
+
+    prefix = content[:matches[0].start()]
+    words: list[LyricWord] = []
+    text_parts: list[str] = [prefix]
+    for i, match in enumerate(matches):
+        next_start = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        segment = content[match.end():next_start]
+        if not segment:
+            continue
+        words.append(
+            LyricWord(
+                timestamp_ms=_parse_timestamp_ms(match.group(1), match.group(2)),
+                text=segment,
+            )
+        )
+        text_parts.append(segment)
+
+    if not words:
+        return content.strip(), None
+    return "".join(text_parts).strip(), words
+
+
+def _is_safe_multi_timestamp_enhanced(
+    words: list[LyricWord], base_timestamp: int
+) -> bool:
+    return (
+        all(word.timestamp_ms >= base_timestamp for word in words)
+        and all(words[i].timestamp_ms <= words[i + 1].timestamp_ms for i in range(len(words) - 1))
+    )
+
+
 def parse_lrc(lrc_text: str) -> ParsedLRC:
     """Parse an LRC-formatted string into a ``ParsedLRC``."""
     result = ParsedLRC()
 
-    for raw in lrc_text.strip().split("\n"):
+    normalized = lrc_text.lstrip("\ufeff")
+
+    for raw in normalized.splitlines():
         raw = raw.strip()
         if not raw:
             continue
@@ -63,50 +106,45 @@ def parse_lrc(lrc_text: str) -> ParsedLRC:
             continue
 
         # Timestamps
-        stamps = _TIMESTAMP_RE.findall(raw)
+        stamp_matches = list(_TIMESTAMP_RE.finditer(raw))
+        stamps = [(_parse_timestamp_ms(m.group(1), m.group(2))) for m in stamp_matches]
         if not stamps:
             continue
 
-        text = _TIMESTAMP_RE.sub("", raw).strip()
+        content = _TIMESTAMP_RE.sub("", raw)
+        text, parsed_words = _parse_enhanced_words(content)
 
-        # Word-level enhanced timing
-        word_content = _TIMESTAMP_RE.sub("", raw).strip()
-        word_matches = list(_WORDTIME_RE.finditer(word_content))
-        parsed_words: list[LyricWord] | None = None
-        if word_matches:
-            parsed_words = []
-            text_parts: list[str] = []
-            for i, match in enumerate(word_matches):
-                mins, secs = match.group(1), match.group(2)
-                ts = int(mins) * 60000 + round(float(secs) * 1000)
-                next_start = (
-                    word_matches[i + 1].start()
-                    if i + 1 < len(word_matches)
-                    else len(word_content)
-                )
-                segment = word_content[match.end():next_start]
-                if not segment:
-                    continue
-                parsed_words.append(
-                    LyricWord(timestamp_ms=ts + result.offset_ms, text=segment)
-                )
-                text_parts.append(segment)
-            if parsed_words:
-                # Preserve inter-word spacing for drawing widths, but do not expose
-                # leading/trailing padding as part of the display line.
-                text = "".join(text_parts).strip()
-            else:
-                parsed_words = None
-
-        for mins, secs in stamps:
-            ts_ms = int(mins) * 60000 + round(float(secs) * 1000)
+        base_timestamp = stamps[0]
+        can_shift_words = parsed_words is not None and _is_safe_multi_timestamp_enhanced(
+            parsed_words, base_timestamp
+        )
+        for ts_ms in stamps:
+            words_for_line = parsed_words
+            if parsed_words is not None and len(stamps) > 1:
+                if can_shift_words:
+                    words_for_line = [
+                        LyricWord(
+                            timestamp_ms=ts_ms + (word.timestamp_ms - base_timestamp),
+                            text=word.text,
+                        )
+                        for word in parsed_words
+                    ]
+                else:
+                    words_for_line = None
             result.lines.append(
                 LyricLine(
-                    timestamp_ms=ts_ms + result.offset_ms,
+                    timestamp_ms=ts_ms,
                     text=text,
-                    words=parsed_words,
+                    words=words_for_line,
                 )
             )
+
+    if result.offset_ms:
+        for line in result.lines:
+            line.timestamp_ms += result.offset_ms
+            if line.words is not None:
+                for word in line.words:
+                    word.timestamp_ms += result.offset_ms
 
     result.lines.sort(key=lambda ln: ln.timestamp_ms)
     return result

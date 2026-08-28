@@ -121,6 +121,60 @@ def test_enhanced_word_timing_applies_offset():
     assert [w.timestamp_ms for w in lrc.lines[0].words] == [1500, 1750]
 
 
+def test_offset_order_independent():
+    cases = [
+        "[offset:500]\n[00:01.00]A\n[00:02.00]B",
+        "[00:01.00]A\n[offset:500]\n[00:02.00]B",
+        "[00:01.00]A\n[00:02.00]B\n[offset:500]",
+    ]
+
+    snapshots = []
+    for text in cases:
+        lrc = parse_lrc(text)
+        snapshots.append([(line.timestamp_ms, line.text) for line in lrc.lines])
+
+    assert snapshots[0] == snapshots[1] == snapshots[2]
+    assert snapshots[0] == [(1500, "A"), (2500, "B")]
+
+
+def test_multi_timestamp_enhanced_words_shift_per_line():
+    lrc = parse_lrc("[00:01.00][00:11.00]<00:01.00>A <00:01.25>B")
+    assert len(lrc.lines) == 2
+    assert lrc.lines[0].words is not None
+    assert lrc.lines[1].words is not None
+    assert [w.timestamp_ms for w in lrc.lines[0].words] == [1000, 1250]
+    assert [w.timestamp_ms for w in lrc.lines[1].words] == [11000, 11250]
+
+
+def test_multi_timestamp_enhanced_unsafe_disables_words():
+    lrc = parse_lrc("[00:05.00][00:10.00]pre<00:04.00>A <00:04.50>B")
+    assert len(lrc.lines) == 2
+    assert lrc.lines[0].text == "preA B"
+    assert lrc.lines[0].words is None
+    assert lrc.lines[1].words is None
+
+
+def test_enhanced_prefix_text_preserved():
+    lrc = parse_lrc("[00:01.00]Hey, <00:01.20>you")
+    assert lrc.lines[0].text == "Hey, you"
+    assert lrc.lines[0].words is not None
+    assert [w.text for w in lrc.lines[0].words] == ["you"]
+
+
+def test_bom_crlf_empty_and_invalid_lines_are_safe():
+    synced = "\ufeff[offset:oops]\r\n[offset:-250]\r\n\r\n[00:01.123]\r\n[00:aa.bb]bad\r\n[00:02.000]Line\r\n"
+    lrc = parse_lrc(synced)
+    assert lrc.offset_ms == -250
+    assert [line.timestamp_ms for line in lrc.lines] == [873, 1750]
+    assert lrc.lines[0].text == ""
+    assert lrc.lines[1].text == "Line"
+
+
+def test_same_timestamp_order_is_stable():
+    lrc = parse_lrc("[00:01.00]A\n[00:01.00]B\n[00:01.00]C")
+    assert [line.text for line in lrc.lines] == ["A", "B", "C"]
+
+
 if __name__ == "__main__":
     import traceback
     tests = [
@@ -136,6 +190,12 @@ if __name__ == "__main__":
         ("enhanced_word_timing", test_enhanced_word_timing),
         ("enhanced_word_timing_without_spaces", test_enhanced_word_timing_without_spaces),
         ("enhanced_word_timing_applies_offset", test_enhanced_word_timing_applies_offset),
+        ("offset_order_independent", test_offset_order_independent),
+        ("multi_timestamp_enhanced_words_shift_per_line", test_multi_timestamp_enhanced_words_shift_per_line),
+        ("multi_timestamp_enhanced_unsafe_disables_words", test_multi_timestamp_enhanced_unsafe_disables_words),
+        ("enhanced_prefix_text_preserved", test_enhanced_prefix_text_preserved),
+        ("bom_crlf_empty_and_invalid_lines_are_safe", test_bom_crlf_empty_and_invalid_lines_are_safe),
+        ("same_timestamp_order_is_stable", test_same_timestamp_order_is_stable),
     ]
     passed = 0
     for name, fn in tests:
