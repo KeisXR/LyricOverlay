@@ -62,6 +62,63 @@ def test_file_logging_failure_uses_fallback_handler(tmp_path):
     assert logging.getLogger(logging_setup.LOGGER_NAME).handlers
 
 
+def test_file_logging_failure_with_captured_stderr_does_not_recurse(
+    tmp_path, monkeypatch, capsys
+):
+    # Packaged builds run capture_legacy_prints() before configure_logging(),
+    # so the fallback handler must not wrap the capture stream: that made the
+    # warning below recurse into the same handler until RecursionError.
+    occupied = tmp_path / "occupied"
+    occupied.write_text("not a directory", encoding="utf-8")
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    try:
+        logging_setup.capture_legacy_prints()
+        state = logging_setup.configure_logging(
+            log_dir=occupied / "logs", console=True
+        )
+        _flush_logger()
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+
+    assert state.fallback
+    assert state.log_file is None
+    assert "File logging unavailable" in capsys.readouterr().err
+
+
+def test_handle_error_write_into_capture_stream_does_not_recurse(
+    tmp_path, monkeypatch, capsys
+):
+    # delay=True lets the log file open fail on the first emit; handleError
+    # then writes the traceback to sys.stderr, which is the capture stream.
+    class FailingHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                raise OSError("disk full")
+            except OSError:
+                self.handleError(record)
+
+    logger = logging.getLogger(logging_setup.LOGGER_NAME)
+    logging_setup.configure_logging(log_dir=tmp_path, console=False)
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+    logger.addHandler(FailingHandler())
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    try:
+        logging_setup.capture_legacy_prints()
+        logger.warning("delayed log file open failed")
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        logging_setup.configure_logging(log_dir=tmp_path, console=False)
+
+    assert "disk full" in capsys.readouterr().err
+
+
 def test_capture_legacy_prints_only_changes_frozen_process(
     tmp_path, monkeypatch
 ):

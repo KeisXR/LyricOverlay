@@ -7,6 +7,7 @@ import logging.handlers
 import os
 import re
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,8 @@ _FAILURE_MARKERS = (
     "no results",
     "not found",
 )
+_MAX_STREAM_UNWRAP = 8
+_reentry = threading.local()
 
 
 @dataclass(frozen=True)
@@ -67,14 +70,30 @@ class PrivacyFilter(logging.Filter):
         return True
 
 
+def _pass_through(stream, text: str) -> int:
+    """Write ``text`` straight to the real stream, ignoring stream failures."""
+    if stream is not None:
+        try:
+            stream.write(text)
+        except Exception:
+            pass
+    return len(text)
+
+
 class LoggingStream:
     """Line-buffered stream used to capture legacy ``print`` calls."""
 
-    def __init__(self, logger: logging.Logger, level: int):
+    def __init__(self, logger: logging.Logger, level: int, stream=None):
         self._logger = logger
         self._level = level
         self._buffer = ""
+        self._stream = stream
         self.encoding = "utf-8"
+
+    @property
+    def wrapped_stream(self):
+        """Real stream this capture stream replaced, if any."""
+        return self._stream
 
     def _emit(self, line: str) -> None:
         normalized = line.casefold()
@@ -84,10 +103,19 @@ class LoggingStream:
                 level = logging.WARNING
             elif any(marker in normalized for marker in _METADATA_MARKERS):
                 level = logging.DEBUG
-        self._logger.log(level, "%s", line.rstrip())
+        _reentry.active = True
+        try:
+            self._logger.log(level, "%s", line.rstrip())
+        finally:
+            _reentry.active = False
 
     def write(self, value) -> int:
         text = str(value)
+        if getattr(_reentry, "active", False):
+            # A handler (or ``Handler.handleError``/``logging.lastResort``)
+            # wrote back into this stream while it was feeding the logger.
+            # Logging it again would recurse until ``RecursionError``.
+            return _pass_through(self._stream, text)
         self._buffer += text
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
@@ -96,12 +124,30 @@ class LoggingStream:
         return len(text)
 
     def flush(self):
+        if getattr(_reentry, "active", False):
+            return
         if self._buffer.strip():
             self._emit(self._buffer)
         self._buffer = ""
 
     def isatty(self) -> bool:
         return False
+
+
+def console_stream():
+    """Return a stderr stream that is safe to hand to a logging handler.
+
+    ``capture_legacy_prints`` replaces ``sys.stderr`` with a ``LoggingStream``
+    feeding the ``lyricaod`` logger, so wrapping it in a ``StreamHandler``
+    makes every record re-enter that handler. Unwrap any capture stream and
+    return ``None`` when no real stream is left (windowed packaged builds).
+    """
+    stream = sys.stderr
+    for _ in range(_MAX_STREAM_UNWRAP):
+        if not isinstance(stream, LoggingStream):
+            return stream
+        stream = stream.wrapped_stream
+    return None
 
 
 def default_log_dir() -> Path:
@@ -178,14 +224,18 @@ def configure_logging(
     if console is None:
         console = not bool(getattr(sys, "frozen", False))
     if console or not logger.handlers:
-        try:
-            stream_handler = logging.StreamHandler(sys.stderr)
-            stream_handler.setLevel(level)
-            stream_handler.setFormatter(formatter)
-            stream_handler.addFilter(privacy)
-            logger.addHandler(stream_handler)
-        except Exception:
+        stream = console_stream()
+        if stream is None:
             fallback = True
+        else:
+            try:
+                stream_handler = logging.StreamHandler(stream)
+                stream_handler.setLevel(level)
+                stream_handler.setFormatter(formatter)
+                stream_handler.addFilter(privacy)
+                logger.addHandler(stream_handler)
+            except Exception:
+                fallback = True
 
     if not logger.handlers:
         logger.addHandler(logging.NullHandler())
@@ -204,8 +254,8 @@ def capture_legacy_prints() -> None:
     """Route legacy module ``print`` output into the file logger in GUI builds."""
     if not bool(getattr(sys, "frozen", False)):
         return
-    sys.stdout = LoggingStream(get_logger("stdout"), logging.INFO)
-    sys.stderr = LoggingStream(get_logger("stderr"), logging.ERROR)
+    sys.stdout = LoggingStream(get_logger("stdout"), logging.INFO, sys.stdout)
+    sys.stderr = LoggingStream(get_logger("stderr"), logging.ERROR, sys.stderr)
 
 
 def get_logger(name: str) -> logging.Logger:
