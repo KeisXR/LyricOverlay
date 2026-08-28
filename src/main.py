@@ -196,6 +196,7 @@ class Application:
         self.lyrics.lyrics_ready.connect(self._on_lyrics_ready)
         self.lyrics.lyrics_not_found.connect(self._on_lyrics_not_found)
         self.lyrics.alternatives_ready.connect(self._on_alternatives_ready)
+        self._qapp.aboutToQuit.connect(self.lyrics.shutdown)
         self.settings.changed.connect(self._on_settings_changed)
         self._current_meta: dict = {}
 
@@ -242,7 +243,7 @@ class Application:
     #  Signal handlers
     # ------------------------------------------------------------------
 
-    def _on_metadata_changed(self, metadata: dict):
+    def _on_metadata_changed(self, metadata: dict, force_refresh: bool = False):
         artist = metadata.get("artist", "")
         title = metadata.get("title", "")
         album = metadata.get("album", "")
@@ -259,8 +260,20 @@ class Application:
         self.overlay.set_seek(0, length_ms)
         if title:
             self.overlay.set_loading(True)
+            # fetch_lyrics starts a new request generation, so any alternatives
+            # fetch still in flight is discarded (it may even be cancelled
+            # before it emits): clear its loading state here so the
+            # alternatives button never stays stuck on "…".
+            self.overlay.set_alternatives_loading(False)
             try:
-                self.lyrics.fetch_lyrics(artist, title, album, trackid, length_ms)
+                self.lyrics.fetch_lyrics(
+                    artist,
+                    title,
+                    album,
+                    trackid,
+                    length_ms,
+                    force_refresh=force_refresh,
+                )
             except Exception as exc:
                 print(f"[Main] fetch_lyrics error: {exc}")
                 self.overlay.set_loading(False)
@@ -315,9 +328,12 @@ class Application:
 
     def _on_alternatives_ready(self, alternatives: list):
         self.overlay.set_alternatives_loading(False)
+        if not alternatives:
+            # No matches, or a discarded stale fetch: keep whatever the
+            # current track already has instead of wiping it.
+            return
         self.overlay.set_alternatives(alternatives)
-        if alternatives:
-            self.overlay._show_alternatives_menu()
+        self.overlay._show_alternatives_menu()
 
     def _on_settings_changed(self):
         self.lyrics.set_lrclib_enabled(
@@ -346,7 +362,7 @@ class Application:
 
     def on_reload(self, metadata: dict):
         """Public entry point for tray 'Reload Lyrics' action."""
-        self._on_metadata_changed(metadata)
+        self._on_metadata_changed(metadata, force_refresh=True)
 
     def _on_overlay_closed(self):
         """Hide the overlay and sync the tray checkbox."""
@@ -359,7 +375,7 @@ class Application:
         self.overlay.set_loading(True)
         meta = self.mpris.get_current_metadata()
         if meta:
-            self._on_metadata_changed(meta)
+            self._on_metadata_changed(meta, force_refresh=True)
         else:
             self.overlay.set_loading(False)
 
