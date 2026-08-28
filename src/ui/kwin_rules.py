@@ -1,16 +1,24 @@
-"""KWin Window Rule helpers for the Wayland overlay."""
+"""Safely manage the single KWin rule owned by Lyricaod.
+
+The module uses KDE's ``kreadconfig``/``kwriteconfig`` commands instead of
+parsing and serialising the user's entire ``kwinrulesrc`` file. Only the fixed
+Lyricaod-owned group and groups an older Lyricaod wrote under a generated id
+are modified; unrelated rules and comments remain under KConfig's control.
+"""
 
 from __future__ import annotations
 
-import configparser
+import logging
 import os
 import shutil
 import subprocess
 from pathlib import Path
-from uuid import uuid4
 
+
+logger = logging.getLogger(__name__)
 
 RULE_DESCRIPTION = "Lyricaod overlay"
+RULE_ID = "lyricaod-overlay-v1"
 APP_ID = "lyricaod"
 WINDOW_TITLE = "Lyricaod Overlay"
 
@@ -20,51 +28,97 @@ def config_path() -> Path:
     return config_home / "kwinrulesrc"
 
 
-def read_config(path: Path | None = None) -> configparser.ConfigParser:
-    parser = configparser.ConfigParser(
-        delimiters=("="),
-        interpolation=None,
-        strict=False,
+def _find_tools() -> tuple[str | None, str | None]:
+    reader = shutil.which("kreadconfig6") or shutil.which("kreadconfig5")
+    writer = shutil.which("kwriteconfig6") or shutil.which("kwriteconfig5")
+    return reader, writer
+
+
+def _run(command: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    parser.optionxform = str
-    target = path or config_path()
-    if target.exists():
-        parser.read(target, encoding="utf-8")
-    return parser
 
 
-def write_config(parser: configparser.ConfigParser, path: Path | None = None) -> None:
-    target = path or config_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if target.exists():
-        backup = target.with_suffix(target.suffix + ".bak")
-        shutil.copy2(target, backup)
-
-    with target.open("w", encoding="utf-8") as fh:
-        parser.write(fh, space_around_delimiters=False)
+def _read_value(reader: str, target: Path, group: str, key: str) -> str:
+    result = _run(
+        [reader, "--file", str(target), "--group", group, "--key", key]
+    )
+    return result.stdout.strip()
 
 
-def general_rules(parser: configparser.ConfigParser) -> list[str]:
-    if not parser.has_section("General"):
-        parser.add_section("General")
+def _write_value(
+    writer: str, target: Path, group: str, key: str, value: str
+) -> None:
+    _run(
+        [
+            writer,
+            "--file",
+            str(target),
+            "--group",
+            group,
+            "--key",
+            key,
+            str(value),
+        ]
+    )
 
-    rules = parser.get("General", "rules", fallback="").strip()
-    if rules:
-        return [rule for rule in rules.split(",") if rule]
 
-    count = parser.getint("General", "count", fallback=0)
-    return [str(index) for index in range(1, count + 1) if parser.has_section(str(index))]
+def _delete_group(writer: str, target: Path, group: str) -> None:
+    _run([writer, "--file", str(target), "--group", group, "--delete"])
 
 
-def find_existing_rule(parser: configparser.ConfigParser) -> str | None:
-    for section in parser.sections():
-        if section == "General":
+def _parse_rules(value: str) -> list[str]:
+    rules: list[str] = []
+    for rule in value.split(","):
+        stripped = rule.strip()
+        if stripped and stripped not in rules:
+            rules.append(stripped)
+    return rules
+
+
+def _legacy_rule_ids(reader: str, target: Path, rules: list[str]) -> list[str]:
+    """Find groups written by older Lyricaod versions under a generated id.
+
+    Only groups carrying Lyricaod's own ``Description`` are reported, so rules
+    the user wrote themselves are never captured.
+    """
+    candidates = list(rules)
+    if not candidates:
+        # Very old configs only track a numbered group count.
+        count = _read_value(reader, target, "General", "count")
+        if count.isdigit():
+            candidates = [str(index) for index in range(1, int(count) + 1)]
+
+    legacy: list[str] = []
+    for group in candidates:
+        if group == RULE_ID or group in legacy:
             continue
-        if parser.get(section, "Description", fallback="") == RULE_DESCRIPTION:
-            return section
-        if parser.get(section, "desktopfile", fallback="") == APP_ID:
-            return section
-    return None
+        try:
+            description = _read_value(reader, target, group, "Description")
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.warning("Unable to inspect KWin rule %s: %s", group, exc)
+            continue
+        if description == RULE_DESCRIPTION:
+            legacy.append(group)
+    return legacy
+
+
+def _retire_legacy_rule(writer: str, target: Path, group: str) -> None:
+    """Disable, then best-effort delete, a rule an older Lyricaod created."""
+    try:
+        _write_value(writer, target, group, "Enabled", "false")
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Unable to disable stale KWin rule %s: %s", group, exc)
+        return
+    try:
+        _delete_group(writer, target, group)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("Stale KWin rule %s left disabled in place: %s", group, exc)
 
 
 def set_rule_enabled(
@@ -73,57 +127,90 @@ def set_rule_enabled(
     path: Path | None = None,
     reload_kwin: bool = True,
 ) -> tuple[str | None, bool]:
-    target = path or config_path()
-    parser = read_config(target)
-    rules = general_rules(parser)
-    rule_id = find_existing_rule(parser)
+    """Create or update only Lyricaod's dedicated KWin rule."""
+    target = Path(path) if path is not None else config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    reader, writer = _find_tools()
+    if not reader or not writer:
+        logger.warning("KDE kreadconfig/kwriteconfig tools are unavailable")
+        return None, False
 
-    if rule_id is None:
-        if not enabled:
-            return None, reload_kwin_config() if reload_kwin else False
-        rule_id = str(uuid4())
-        parser.add_section(rule_id)
-        rules.append(rule_id)
-    elif rule_id not in rules:
-        rules.append(rule_id)
+    backup = target.with_name(target.name + ".lyricaod-backup")
+    target_existed = target.exists()
+    try:
+        if target_existed:
+            shutil.copy2(target, backup)
 
-    values = {
-        "Description": RULE_DESCRIPTION,
-        "Enabled": "true" if enabled else "false",
-        "above": "true",
-        "aboverule": "2",
-        "layer": "above",
-        "layerrule": "2",
-        "skiptaskbar": "true",
-        "skiptaskbarrule": "2",
-        "skippager": "true",
-        "skippagerrule": "2",
-        "skipswitcher": "true",
-        "skipswitcherrule": "2",
-        "title": WINDOW_TITLE,
-        "titlematch": "1",
-        "wmclass": APP_ID,
-        "wmclassmatch": "1",
-        "desktopfile": APP_ID,
-        "desktopfilerule": "2",
-    }
-    for key, value in values.items():
-        parser.set(rule_id, key, value)
+        raw_rules = _read_value(reader, target, "General", "rules")
+        rules = _parse_rules(raw_rules)
 
-    parser.set("General", "rules", ",".join(rules))
-    parser.set("General", "count", str(len(rules)))
-    write_config(parser, target)
-    return rule_id, reload_kwin_config() if reload_kwin else False
+        # Retire rules an older Lyricaod stored under a generated uuid, so the
+        # fixed id below stays the single source of truth for this setting.
+        legacy_ids = _legacy_rule_ids(reader, target, rules)
+        for legacy_id in legacy_ids:
+            _retire_legacy_rule(writer, target, legacy_id)
+        if legacy_ids:
+            rules = [rule for rule in rules if rule not in legacy_ids]
+
+        if RULE_ID not in rules:
+            rules.append(RULE_ID)
+
+        values = {
+            "Description": RULE_DESCRIPTION,
+            "Enabled": "true" if enabled else "false",
+            "above": "true",
+            "aboverule": "2",
+            "layer": "above",
+            "layerrule": "2",
+            "skiptaskbar": "true",
+            "skiptaskbarrule": "2",
+            "skippager": "true",
+            "skippagerrule": "2",
+            "skipswitcher": "true",
+            "skipswitcherrule": "2",
+            "title": WINDOW_TITLE,
+            "titlematch": "1",
+            "wmclass": APP_ID,
+            "wmclassmatch": "1",
+            "desktopfile": APP_ID,
+            "desktopfilerule": "2",
+        }
+        for key, value in values.items():
+            _write_value(writer, target, RULE_ID, key, value)
+
+        _write_value(writer, target, "General", "rules", ",".join(rules))
+        _write_value(writer, target, "General", "count", str(len(rules)))
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.error("KWin rule update failed: %s", exc)
+        try:
+            if backup.exists():
+                os.replace(backup, target)
+            elif not target_existed:
+                target.unlink(missing_ok=True)
+        except OSError as restore_error:
+            logger.error("Unable to restore KWin rules backup: %s", restore_error)
+        return None, False
+    finally:
+        try:
+            backup.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    reloaded = reload_kwin_config() if reload_kwin else False
+    return RULE_ID, reloaded
 
 
 def reload_kwin_config() -> bool:
     qdbus = shutil.which("qdbus6") or shutil.which("qdbus")
     if not qdbus:
         return False
-    result = subprocess.run(
-        [qdbus, "org.kde.KWin", "/KWin", "reconfigure"],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        result = subprocess.run(
+            [qdbus, "org.kde.KWin", "/KWin", "reconfigure"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
     return result.returncode == 0
