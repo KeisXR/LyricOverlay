@@ -32,7 +32,7 @@ echo "==> Installing locked build dependencies..."
     "pip==26.1.1"
 "${BUILD_VENV}/bin/python" -m pip install \
     --disable-pip-version-check \
-    -r "${PROJECT_DIR}/requirements-build.lock"
+    -r "${PROJECT_DIR}/requirements-build-lock.txt"
 
 echo "==> Building Linux executable..."
 "${BUILD_VENV}/bin/python" -m PyInstaller \

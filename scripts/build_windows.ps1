@@ -38,7 +38,7 @@ $Python = Join-Path $BuildVenv "Scripts\python.exe"
 
 Write-Host "==> Installing locked build dependencies..."
 Invoke-Native $Python -m pip install --disable-pip-version-check "pip==26.1.1"
-Invoke-Native $Python -m pip install --disable-pip-version-check -r (Join-Path $ProjectDir "requirements-build.lock")
+Invoke-Native $Python -m pip install --disable-pip-version-check -r (Join-Path $ProjectDir "requirements-build-lock.txt")
 
 Write-Host "==> Building Windows executable..."
 Invoke-Native $Python -m PyInstaller `

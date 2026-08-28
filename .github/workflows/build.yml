@@ -27,7 +27,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.lock
+          cache-dependency-path: requirements-dev-lock.txt
       - name: Install native dependencies
         run: |
           sudo apt-get update
@@ -37,7 +37,7 @@ jobs:
       - name: Install locked test dependencies
         run: |
           python -m pip install "pip==26.1.1"
-          python -m pip install -r requirements-dev.lock
+          python -m pip install -r requirements-dev-lock.txt
       - name: Compile check
         run: python -m compileall -q src tests
       - name: Ruff correctness checks
@@ -58,12 +58,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-dev.lock
+          cache-dependency-path: requirements-dev-lock.txt
       - name: Install locked test dependencies
         shell: pwsh
         run: |
           python -m pip install "pip==26.1.1"
-          python -m pip install -r requirements-dev.lock
+          python -m pip install -r requirements-dev-lock.txt
       - name: Compile check
         run: python -m compileall -q src tests
       - name: Ruff correctness checks
@@ -110,13 +110,36 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-build.lock
+          cache-dependency-path: requirements-build-lock.txt
       - name: Build locked package
         shell: pwsh
         run: .\scripts\build_windows.ps1
       - name: Smoke-test packaged executable
         shell: pwsh
-        run: .\dist\Lyricaod\Lyricaod.exe --help
+        run: |
+          # The package is a GUI-subsystem binary: invoking it directly returns
+          # before it runs and leaves $LASTEXITCODE unset, so the step reported
+          # success whatever the executable did. Redirecting the standard streams
+          # also hands the windowed process usable stdout/stderr handles.
+          $startArgs = @{
+            FilePath               = '.\dist\Lyricaod\Lyricaod.exe'
+            ArgumentList           = '--help'
+            PassThru               = $true
+            NoNewWindow            = $true
+            RedirectStandardOutput = 'smoke-stdout.txt'
+            RedirectStandardError  = 'smoke-stderr.txt'
+          }
+          $proc = Start-Process @startArgs
+          if (-not $proc.WaitForExit(60000)) {
+            $proc.Kill()
+            Get-Content smoke-stderr.txt -ErrorAction SilentlyContinue
+            throw 'Packaged executable did not exit within 60 seconds'
+          }
+          Get-Content smoke-stdout.txt -ErrorAction SilentlyContinue
+          Get-Content smoke-stderr.txt -ErrorAction SilentlyContinue
+          if ($proc.ExitCode -ne 0) {
+            throw "Packaged executable exited with code $($proc.ExitCode)"
+          }
       - name: Create package archive
         shell: pwsh
         run: Compress-Archive -Path .\dist\Lyricaod -DestinationPath .\dist\Lyricaod-windows.zip -Force

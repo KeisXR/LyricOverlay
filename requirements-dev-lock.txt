@@ -1,4 +1,4 @@
--r requirements.lock
+-r requirements-lock.txt
 
 pytest==9.0.2
 pytest-qt==4.5.0

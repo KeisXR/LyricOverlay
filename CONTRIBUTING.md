@@ -8,7 +8,7 @@ Use Python 3.12. Runtime, build, and test dependencies are deliberately split:
 python -m venv .venv
 source .venv/bin/activate       # Windows: .\.venv\Scripts\Activate.ps1
 python -m pip install "pip==26.1.1"
-python -m pip install -r requirements-dev.lock
+python -m pip install -r requirements-dev-lock.txt
 ```
 
 Linux also needs the D-Bus/GLib and Qt runtime packages listed in `README.md`.
