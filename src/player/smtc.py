@@ -343,7 +343,17 @@ class SmtcListener(QObject):
         rate_changed = not math.isclose(
             rate, self._timeline.rate, rel_tol=1e-9, abs_tol=1e-9
         )
-        seek_detected = abs(reported_pos_ms - predicted) > _SEEK_THRESHOLD_MS
+        # Players that never refresh their SMTC position repeat the identical
+        # value, so drifting away from the prediction is expected and must not
+        # re-anchor: only a report that actually moved can be a seek.
+        report_advanced = (
+            self._last_reported_pos_ms is None
+            or reported_pos_ms != self._last_reported_pos_ms
+        )
+        seek_detected = (
+            report_advanced
+            and abs(reported_pos_ms - predicted) > _SEEK_THRESHOLD_MS
+        )
 
         if not self._fallback or seek_detected:
             anchor_pos = reported_pos_ms

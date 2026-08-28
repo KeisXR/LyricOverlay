@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import sys
 import types
 from pathlib import Path
+
+import pytest
 
 
 class _SignalInstance:
@@ -83,15 +86,51 @@ qtcore.QTimer = _QTimer
 qtcore.Signal = _signal
 pyside = types.ModuleType("PySide6")
 pyside.QtCore = qtcore
-sys.modules.setdefault("PySide6", pyside)
-sys.modules.setdefault("PySide6.QtCore", qtcore)
+
+
+@contextlib.contextmanager
+def _stubbed_modules(modules):
+    """Install stub modules for the duration of the block, then restore.
+
+    The stubs must win over an already-imported real PySide6 (another test
+    module may have pulled it in first), and must not leak out of this file.
+    """
+    missing = object()
+    saved = {name: sys.modules.get(name, missing) for name in modules}
+    sys.modules.update(modules)
+    try:
+        yield
+    finally:
+        for name, previous in saved.items():
+            if previous is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
+
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "src" / "player" / "smtc.py"
 spec = importlib.util.spec_from_file_location("smtc_under_test", MODULE_PATH)
-smtc = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
-sys.modules[spec.name] = smtc
-spec.loader.exec_module(smtc)
+smtc = importlib.util.module_from_spec(spec)
+with _stubbed_modules(
+    {"PySide6": pyside, "PySide6.QtCore": qtcore, spec.name: smtc}
+):
+    spec.loader.exec_module(smtc)
+
+
+@pytest.fixture
+def make_listener():
+    """Build listeners and guarantee they are stopped after the test."""
+    listeners = []
+
+    def _make(**kwargs):
+        listener = smtc.SmtcListener(**kwargs)
+        listeners.append(listener)
+        return listener
+
+    yield _make
+    for listener in listeners:
+        listener.stop()
 
 
 class _Clock:
@@ -121,9 +160,9 @@ def _state(**overrides):
     return state
 
 
-def test_active_change_observer_sees_new_metadata():
+def test_active_change_observer_sees_new_metadata(make_listener):
     clock = _Clock()
-    listener = smtc.SmtcListener(clock=clock)
+    listener = make_listener(clock=clock)
     observed = []
     listener.active_player_changed.connect(
         lambda _player: observed.append(listener.get_current_metadata())
@@ -135,9 +174,9 @@ def test_active_change_observer_sees_new_metadata():
     assert listener.get_active_player() == "player.app"
 
 
-def test_none_snapshot_clears_state_and_emits_stopped():
+def test_none_snapshot_clears_state_and_emits_stopped(make_listener):
     clock = _Clock()
-    listener = smtc.SmtcListener(clock=clock)
+    listener = make_listener(clock=clock)
     stopped = []
     listener.playback_state_changed.connect(lambda *args: stopped.append(args))
     listener._apply_state(_state())
@@ -150,9 +189,9 @@ def test_none_snapshot_clears_state_and_emits_stopped():
     assert stopped[-1][0] == "Stopped"
 
 
-def test_regular_position_reports_do_not_reanchor_as_seeks():
+def test_regular_position_reports_do_not_reanchor_as_seeks(make_listener):
     clock = _Clock()
-    listener = smtc.SmtcListener(clock=clock, fallback=True)
+    listener = make_listener(clock=clock, fallback=True)
     listener._apply_state(_state(pos_ms=0))
     original_anchor_time = listener._timeline.observed_at
 
@@ -164,9 +203,9 @@ def test_regular_position_reports_do_not_reanchor_as_seeks():
     assert listener._timeline.position_ms == 0
 
 
-def test_large_seek_reanchors_to_reported_position():
+def test_large_seek_reanchors_to_reported_position(make_listener):
     clock = _Clock()
-    listener = smtc.SmtcListener(clock=clock, fallback=True)
+    listener = make_listener(clock=clock, fallback=True)
     listener._apply_state(_state(pos_ms=1000))
     clock.advance(0.25)
 
@@ -176,9 +215,28 @@ def test_large_seek_reanchors_to_reported_position():
     assert listener._timeline.observed_at == clock.value
 
 
-def test_pause_resume_does_not_include_paused_wall_time():
+def test_stale_position_reports_advance_monotonically(make_listener):
     clock = _Clock()
-    listener = smtc.SmtcListener(clock=clock)
+    listener = make_listener(clock=clock, fallback=True)
+    positions = []
+    listener.position_changed.connect(positions.append)
+    listener._apply_state(_state(pos_ms=10000))
+
+    # A player that never refreshes its SMTC position while playing.
+    for _ in range(24):
+        clock.advance(0.25)
+        listener._apply_state(_state(pos_ms=10000))
+        listener._tick_position()
+
+    assert positions == sorted(positions)
+    assert positions[0] == 10250
+    assert positions[-1] == 16000
+    assert listener._timeline.position_ms == 10000
+
+
+def test_pause_resume_does_not_include_paused_wall_time(make_listener):
+    clock = _Clock()
+    listener = make_listener(clock=clock)
     positions = []
     listener.position_changed.connect(positions.append)
     listener._apply_state(_state(pos_ms=2000))
@@ -193,9 +251,9 @@ def test_pause_resume_does_not_include_paused_wall_time():
     assert positions[-1] == 4000
 
 
-def test_rate_change_settles_old_rate_before_new_interpolation():
+def test_rate_change_settles_old_rate_before_new_interpolation(make_listener):
     clock = _Clock()
-    listener = smtc.SmtcListener(clock=clock)
+    listener = make_listener(clock=clock)
     positions = []
     listener.position_changed.connect(positions.append)
     listener._apply_state(_state(pos_ms=0, rate=1.0))
@@ -208,8 +266,8 @@ def test_rate_change_settles_old_rate_before_new_interpolation():
     assert positions[-1] == 5000
 
 
-def test_invalid_numbers_are_clamped():
-    listener = smtc.SmtcListener(clock=_Clock())
+def test_invalid_numbers_are_clamped(make_listener):
+    listener = make_listener(clock=_Clock())
     listener._apply_state(
         _state(pos_ms=float("nan"), length_ms=-1, rate=float("inf"))
     )
