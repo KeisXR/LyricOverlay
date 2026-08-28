@@ -36,7 +36,7 @@ $Python = Join-Path $VenvDir "Scripts\python.exe"
 
 Write-Host "==> Installing locked runtime dependencies..."
 Invoke-Native $Python -m pip install --disable-pip-version-check "pip==26.1.1"
-Invoke-Native $Python -m pip install --disable-pip-version-check -r (Join-Path $ScriptDir "requirements.lock")
+Invoke-Native $Python -m pip install --disable-pip-version-check -r (Join-Path $ScriptDir "requirements-lock.txt")
 
 Write-Host ""
 Write-Host "==> Setup complete!"
